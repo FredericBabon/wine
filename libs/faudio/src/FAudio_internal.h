@@ -131,6 +131,7 @@ extern void FAudio_Log(char const *msg);
 #define FAudio_swap64BE(x) SDL_Swap64BE(x)
 
 #else
+#include <stdio.h>
 #include <SDL_stdinc.h>
 #include <SDL_assert.h>
 #include <SDL_endian.h>
@@ -206,7 +207,16 @@ extern void FAudio_Log(char const *msg);
 #endif
 #define FAudio_snprintf SDL_snprintf
 #define FAudio_vsnprintf SDL_vsnprintf
-#define FAudio_Log(msg) SDL_Log("%s", msg)
+static inline void FAudio_Log_ToFile(const char *msg)
+{
+	FILE *f = fopen("/tmp/faudio.log", "a");
+	if (f != NULL)
+	{
+		fprintf(f, "%s\n", msg);
+		fclose(f);
+	}
+}
+#define FAudio_Log(msg) FAudio_Log_ToFile(msg)
 #define FAudio_getenv SDL_getenv
 #define FAudio_PRIu64 SDL_PRIu64
 #define FAudio_PRIx64 SDL_PRIx64
