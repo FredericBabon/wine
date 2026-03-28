@@ -965,6 +965,7 @@ void FAudio_SetDebugConfiguration(
 	);
 
 	env = FAudio_getenv("FAUDIO_LOG_EVERYTHING");
+	env = "1";
 	if (env != NULL && *env == '1')
 	{
 		audio->debug.TraceMask = (

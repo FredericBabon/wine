@@ -28,6 +28,8 @@
 #include "FAPOBase.h"
 #include <stdarg.h>
 
+/* Force debug configuration to be enabled, regardless of build flags */
+#undef FAUDIO_DISABLE_DEBUGCONFIGURATION
 
 #ifdef FAUDIO_WIN32_PLATFORM
 #include <stdio.h>
