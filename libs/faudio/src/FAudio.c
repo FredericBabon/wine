@@ -966,6 +966,18 @@ void FAudio_SetDebugConfiguration(
 
 	env = FAudio_getenv("FAUDIO_LOG_EVERYTHING");
 	env = "1";
+	
+	/* Direct file write test - MUST be compiled and executed */
+	{
+		FILE *test_f = fopen("/tmp/faudio_test.log", "w");
+		if (test_f != NULL)
+		{
+			fprintf(test_f, "FAudio DLL is loaded and executing!\n");
+			fprintf(test_f, "Timestamp: This file was created during FAudio initialization\n");
+			fclose(test_f);
+		}
+	}
+	
 	if (env != NULL && *env == '1')
 	{
 		audio->debug.TraceMask = (
