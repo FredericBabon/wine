@@ -39,6 +39,7 @@
 #include <math.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <time.h>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -132,6 +133,7 @@ extern void FAudio_Log(char const *msg);
 
 #else
 #include <stdio.h>
+#include <time.h>
 #include <SDL_stdinc.h>
 #include <SDL_assert.h>
 #include <SDL_endian.h>
@@ -603,7 +605,11 @@ static inline void FAudio_Log_API_Call(const char *func_name, const char *enter_
 {
 	FILE *f = fopen("/tmp/faudio_test.log", "a");
 	if (f != NULL)
-	{
+	{time_t now = time(NULL);
+		struct tm *timeinfo = localtime(&now);
+		char timestamp[32];
+		strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
+		fprintf(f, "[%s] [%s] %s\n", timestamp
 		fprintf(f, "[%s] %s\n", enter_exit, func_name);
 		fclose(f);
 	}
