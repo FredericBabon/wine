@@ -615,23 +615,23 @@ static inline void FAudio_Log_API_Call(const char *func_name, const char *enter_
 
 #ifdef FAUDIO_DISABLE_DEBUGCONFIGURATION
 
-#define LOG_ERROR(engine, fmt, ...) (void)0
-#define LOG_WARNING(engine, fmt, ...) (void)0
-#define LOG_INFO(engine, fmt, ...) (void)0
-#define LOG_DETAIL(engine, fmt, ...) (void)0
-#define LOG_API_ENTER(engine) (void)0
-#define LOG_API_EXIT(engine) (void)0
-#define LOG_FUNC_ENTER(engine) (void)0
-#define LOG_FUNC_EXIT(engine) (void)0
+#define LOG_ERROR(engine, fmt, ...) do { } while(0)
+#define LOG_WARNING(engine, fmt, ...) do { } while(0)
+#define LOG_INFO(engine, fmt, ...) do { } while(0)
+#define LOG_DETAIL(engine, fmt, ...) do { } while(0)
+#define LOG_API_ENTER(engine) do { } while(0)
+#define LOG_API_EXIT(engine) do { } while(0)
+#define LOG_FUNC_ENTER(engine) do { } while(0)
+#define LOG_FUNC_EXIT(engine) do { } while(0)
 /* TODO: LOG_TIMING */
-#define LOG_MUTEX_CREATE(engine, mutex) (void)0
-#define LOG_MUTEX_DESTROY(engine, mutex) (void)0
-#define LOG_MUTEX_LOCK(engine, mutex) (void)0
-#define LOG_MUTEX_UNLOCK(engine, mutex) (void)0
+#define LOG_MUTEX_CREATE(engine, mutex) do { } while(0)
+#define LOG_MUTEX_DESTROY(engine, mutex) do { } while(0)
+#define LOG_MUTEX_LOCK(engine, mutex) do { } while(0)
+#define LOG_MUTEX_UNLOCK(engine, mutex) do { } while(0)
 /* TODO: LOG_MEMORY */
 /* TODO: LOG_STREAMING */
 
-#define LOG_FORMAT(engine, waveFormat) (void)0
+#define LOG_FORMAT(engine, waveFormat) do { } while(0)
 
 #else
 
