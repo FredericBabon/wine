@@ -619,8 +619,8 @@ static inline void FAudio_Log_API_Call(const char *func_name, const char *enter_
 #define LOG_WARNING(engine, fmt, ...)
 #define LOG_INFO(engine, fmt, ...)
 #define LOG_DETAIL(engine, fmt, ...)
-#define LOG_API_ENTER(engine) do { FAudio_Log_API_Call(__func__, "ENTER"); } while(0)
-#define LOG_API_EXIT(engine) do { FAudio_Log_API_Call(__func__, "EXIT"); } while(0)
+#define LOG_API_ENTER(engine) ((void)0, FAudio_Log_API_Call(__func__, "ENTER"))
+#define LOG_API_EXIT(engine) ((void)0, FAudio_Log_API_Call(__func__, "EXIT"))
 #define LOG_FUNC_ENTER(engine)
 #define LOG_FUNC_EXIT(engine)
 /* TODO: LOG_TIMING */
