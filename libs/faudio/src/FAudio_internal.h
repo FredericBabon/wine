@@ -598,22 +598,22 @@ extern const float FAUDIO_INTERNAL_MATRIX_DEFAULTS[8][8][64];
 
 /* Debug */
 
-#ifdef FAUDIO_DISABLE_DEBUGCONFIGURATION
-
 /* Direct file logging - ALWAYS ENABLED for debugging */
 static inline void FAudio_Log_API_Call(const char *func_name, const char *enter_exit)
 {
 	FILE *f = fopen("/tmp/faudio_test.log", "a");
 	if (f != NULL)
-	{time_t now = time(NULL);
+	{
+		time_t now = time(NULL);
 		struct tm *timeinfo = localtime(&now);
 		char timestamp[32];
 		strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
-		fprintf(f, "[%s] [%s] %s\n", timestamp
-		fprintf(f, "[%s] %s\n", enter_exit, func_name);
+		fprintf(f, "[%s] [%s] %s\n", timestamp, enter_exit, func_name);
 		fclose(f);
 	}
 }
+
+#ifdef FAUDIO_DISABLE_DEBUGCONFIGURATION
 
 #define LOG_ERROR(engine, fmt, ...)
 #define LOG_WARNING(engine, fmt, ...)
