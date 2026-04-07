@@ -598,21 +598,6 @@ extern const float FAUDIO_INTERNAL_MATRIX_DEFAULTS[8][8][64];
 
 /* Debug */
 
-/* Direct file logging - ALWAYS ENABLED for debugging */
-static inline void FAudio_Log_API_Call(const char *func_name, const char *enter_exit)
-{
-	FILE *f = fopen("/tmp/faudio_test.log", "a");
-	if (f != NULL)
-	{
-		time_t now = time(NULL);
-		struct tm *timeinfo = localtime(&now);
-		char timestamp[32];
-		strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
-		fprintf(f, "[%s] [%s] %s\n", timestamp, enter_exit, func_name);
-		fclose(f);
-	}
-}
-
 #ifdef FAUDIO_DISABLE_DEBUGCONFIGURATION
 
 #define LOG_ERROR(engine, fmt, ...) do { } while(0)
@@ -669,6 +654,20 @@ void FAudio_INTERNAL_debug_fmt(
 #define PRINT_DEBUG(engine, cond, type, fmt, ...) \
 	if (engine->debug.TraceMask & FAUDIO_LOG_##cond) \
 	{ \
+		do { \
+			FILE *f = fopen("/tmp/faudio_test.log", "a"); \
+			if (f != NULL) \
+			{ \
+				time_t now = time(NULL); \
+				struct tm *timeinfo = localtime(&now); \
+				char timestamp[32]; \
+				strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo); \
+				fprintf(f, "[%s] [%s] ", timestamp, type); \
+				fprintf(f, fmt, __VA_ARGS__); \
+				fprintf(f, "\n"); \
+				fclose(f); \
+			} \
+		} while(0); \
 		FAudio_INTERNAL_debug( \
 			engine, \
 			__FILE__, \
