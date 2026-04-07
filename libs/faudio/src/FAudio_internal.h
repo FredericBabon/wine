@@ -683,14 +683,8 @@ void FAudio_INTERNAL_debug_fmt(
 #define LOG_WARNING(engine, fmt, ...) PRINT_DEBUG(engine, WARNINGS, "WARNING", fmt, __VA_ARGS__)
 #define LOG_INFO(engine, fmt, ...) PRINT_DEBUG(engine, INFO, "INFO", fmt, __VA_ARGS__)
 #define LOG_DETAIL(engine, fmt, ...) PRINT_DEBUG(engine, DETAIL, "DETAIL", fmt, __VA_ARGS__)
-#define LOG_API_ENTER(engine) do { \
-	PRINT_DEBUG(engine, API_CALLS, "API Enter", "%s", __func__) \
-	FAudio_Log_API_Call(__func__, "ENTER"); \
-} while(0)
-#define LOG_API_EXIT(engine) do { \
-	PRINT_DEBUG(engine, API_CALLS, "API Exit", "%s", __func__) \
-	FAudio_Log_API_Call(__func__, "EXIT"); \
-} while(0)
+#define LOG_API_ENTER(engine) PRINT_DEBUG(engine, API_CALLS, "API Enter", "%s", __func__)
+#define LOG_API_EXIT(engine) PRINT_DEBUG(engine, API_CALLS, "API Exit", "%s", __func__)
 #define LOG_FUNC_ENTER(engine) PRINT_DEBUG(engine, FUNC_CALLS, "FUNC Enter", "%s", __func__)
 #define LOG_FUNC_EXIT(engine) PRINT_DEBUG(engine, FUNC_CALLS, "FUNC Exit", "%s", __func__)
 /* TODO: LOG_TIMING */
