@@ -26,6 +26,147 @@
 
 #include "FAudio_internal.h"
 
+/* Global logging buffer */
+FAudio_LogBuffer FAudio_g_logbuffer = {0};
+
+/* Initialize logging system */
+void FAudio_INTERNAL_LogInit(void)
+{
+	FAudioMutex old_lock = FAudio_g_logbuffer.lock;
+	
+	if (FAudio_g_logbuffer.initialized)
+		return;
+	
+	FAudio_zero(&FAudio_g_logbuffer, sizeof(FAudio_LogBuffer));
+	FAudio_g_logbuffer.lock = FAudio_PlatformCreateMutex();
+	FAudio_g_logbuffer.logfile = fopen("/tmp/faudio_test.log", "a");
+	FAudio_g_logbuffer.write_idx = 0;
+	FAudio_g_logbuffer.flush_idx = 0;
+	FAudio_g_logbuffer.initialized = 1;
+}
+
+/* Shutdown logging system */
+void FAudio_INTERNAL_LogShutdown(void)
+{
+	if (!FAudio_g_logbuffer.initialized)
+		return;
+	
+	FAudio_INTERNAL_LogFlush();
+	
+	FAudio_PlatformLockMutex(FAudio_g_logbuffer.lock);
+	if (FAudio_g_logbuffer.logfile)
+	{
+		fclose(FAudio_g_logbuffer.logfile);
+		FAudio_g_logbuffer.logfile = NULL;
+	}
+	FAudio_PlatformUnlockMutex(FAudio_g_logbuffer.lock);
+	
+	FAudio_PlatformDestroyMutex(FAudio_g_logbuffer.lock);
+	FAudio_g_logbuffer.initialized = 0;
+}
+
+/* Append entry to circular buffer */
+void FAudio_INTERNAL_LogEntry(const char *entry)
+{
+	uint32_t len, idx, available;
+	
+	if (!FAudio_g_logbuffer.initialized || !entry)
+		return;
+	
+	len = (uint32_t)FAudio_strlen(entry);
+	if (len == 0 || len >= FAUDIO_LOG_ENTRY_SIZE)
+		return;
+	
+	FAudio_PlatformLockMutex(FAudio_g_logbuffer.lock);
+	
+	idx = FAudio_g_logbuffer.write_idx % FAUDIO_LOG_BUFFER_SIZE;
+	available = (FAUDIO_LOG_BUFFER_SIZE - (FAudio_g_logbuffer.write_idx - FAudio_g_logbuffer.flush_idx));
+	
+	/* If buffer is 80% full, flush before writing */
+	if (available < (FAUDIO_LOG_BUFFER_SIZE / 5))
+	{
+		FAudio_INTERNAL_LogFlush();
+		idx = FAudio_g_logbuffer.write_idx % FAUDIO_LOG_BUFFER_SIZE;
+	}
+	
+	/* Copy entry into buffer slot */
+	FAudio_memcpy(
+		FAudio_g_logbuffer.buffer + (idx * FAUDIO_LOG_ENTRY_SIZE),
+		entry,
+		len + 1
+	);
+	FAudio_g_logbuffer.write_idx++;
+	
+	FAudio_PlatformUnlockMutex(FAudio_g_logbuffer.lock);
+}
+
+/* Flush buffered log entries to disk */
+void FAudio_INTERNAL_LogFlush(void)
+{
+	uint32_t count, i, idx;
+	
+	if (!FAudio_g_logbuffer.initialized || !FAudio_g_logbuffer.logfile)
+		return;
+	
+	count = FAudio_g_logbuffer.write_idx - FAudio_g_logbuffer.flush_idx;
+	
+	for (i = 0; i < count; i++)
+	{
+		idx = (FAudio_g_logbuffer.flush_idx + i) % FAUDIO_LOG_BUFFER_SIZE;
+		fprintf(
+			FAudio_g_logbuffer.logfile,
+			"%s",
+			FAudio_g_logbuffer.buffer + (idx * FAUDIO_LOG_ENTRY_SIZE)
+		);
+	}
+	
+	if (count > 0)
+	{
+		fflush(FAudio_g_logbuffer.logfile);
+		FAudio_g_logbuffer.flush_idx = FAudio_g_logbuffer.write_idx;
+	}
+}
+
+/* Format and log entry with type and timestamp */
+void FAudio_INTERNAL_LogFormatted(
+	const char *type,
+	const char *fmt,
+	...)
+{
+	char entry_buf[FAUDIO_LOG_ENTRY_SIZE];
+	char msg_buf[FAUDIO_LOG_ENTRY_SIZE - 64];
+	time_t now;
+	struct tm *timeinfo;
+	char timestamp[32];
+	va_list args;
+	int len;
+	
+	if (!FAudio_g_logbuffer.initialized)
+		return;
+	
+	/* Get current time */
+	now = time(NULL);
+	timeinfo = localtime(&now);
+	strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
+	
+	/* Format the message part */
+	va_start(args, fmt);
+	FAudio_vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
+	va_end(args);
+	
+	/* Combine timestamp, type, and message */
+	FAudio_snprintf(
+		entry_buf,
+		sizeof(entry_buf),
+		"[%s] [%s] %s\n",
+		timestamp,
+		type,
+		msg_buf
+	);
+	
+	FAudio_INTERNAL_LogEntry(entry_buf);
+}
+
 #define MAKE_SUBFORMAT_GUID(guid, fmt) \
 	FAudioGUID DATAFORMAT_SUBTYPE_##guid = \
 	{ \
@@ -182,6 +323,15 @@ uint32_t FAudio_Release(FAudio *audio)
 		audio->pFree(audio->decodeCache);
 		audio->pFree(audio->resampleCache);
 		audio->pFree(audio->effectChainCache);
+		
+		/* Flush any pending log entries before shutdown */
+		if (FAudio_g_logbuffer.initialized)
+		{
+			FAudio_PlatformLockMutex(FAudio_g_logbuffer.lock);
+			FAudio_INTERNAL_LogFlush();
+			FAudio_PlatformUnlockMutex(FAudio_g_logbuffer.lock);
+		}
+		
 		LOG_MUTEX_DESTROY(audio, audio->sourceLock)
 		FAudio_PlatformDestroyMutex(audio->sourceLock);
 		LOG_MUTEX_DESTROY(audio, audio->submixLock)
@@ -228,6 +378,12 @@ uint32_t FAudio_Initialize(
 	LOG_API_ENTER(audio)
 	FAudio_assert(Flags == 0 || Flags == FAUDIO_DEBUG_ENGINE);
 	FAudio_assert(XAudio2Processor == FAUDIO_DEFAULT_PROCESSOR);
+
+	/* Initialize async logging on first call */
+	if (!FAudio_g_logbuffer.initialized)
+	{
+		FAudio_INTERNAL_LogInit();
+	}
 
 	audio->initFlags = Flags;
 

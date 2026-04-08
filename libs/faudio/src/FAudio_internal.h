@@ -596,7 +596,30 @@ uint32_t FAudio_INTERNAL_VoiceOutputFrequency(
 );
 extern const float FAUDIO_INTERNAL_MATRIX_DEFAULTS[8][8][64];
 
-/* Debug */
+/* Debug - Async Buffered Logging */
+
+/* Circular buffer for log entries - reduces disk I/O overhead */
+#define FAUDIO_LOG_BUFFER_SIZE 1024 /* max entries in flight */
+#define FAUDIO_LOG_ENTRY_SIZE 256   /* max bytes per log entry */
+
+typedef struct
+{
+	char buffer[FAUDIO_LOG_BUFFER_SIZE * FAUDIO_LOG_ENTRY_SIZE];
+	volatile uint32_t write_idx;  /* incremented atomically by log calls */
+	uint32_t flush_idx;           /* incremented only during flush */
+	FAudioMutex lock;
+	FILE *logfile;
+	uint8_t initialized;
+} FAudio_LogBuffer;
+
+/* Global logging state */
+extern FAudio_LogBuffer FAudio_g_logbuffer;
+
+/* Initialize/cleanup logging system */
+void FAudio_INTERNAL_LogInit(void);
+void FAudio_INTERNAL_LogShutdown(void);
+void FAudio_INTERNAL_LogFlush(void); /* Force flush buffered entries to disk */
+void FAudio_INTERNAL_LogEntry(const char *entry); /* Append entry to buffer */
 
 #ifdef FAUDIO_DISABLE_DEBUGCONFIGURATION
 
@@ -651,23 +674,17 @@ void FAudio_INTERNAL_debug_fmt(
 	const FAudioWaveFormatEx *fmt
 );
 
+/* Helper for buffered formatted logging */
+void FAudio_INTERNAL_LogFormatted(
+	const char *type,
+	const char *fmt,
+	...
+);
+
 #define PRINT_DEBUG(engine, cond, type, fmt, ...) \
 	if (engine->debug.TraceMask & FAUDIO_LOG_##cond) \
 	{ \
-		do { \
-			FILE *f = fopen("/tmp/faudio_test.log", "a"); \
-			if (f != NULL) \
-			{ \
-				time_t now = time(NULL); \
-				struct tm *timeinfo = localtime(&now); \
-				char timestamp[32]; \
-				strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo); \
-				fprintf(f, "[%s] [%s] ", timestamp, type); \
-				fprintf(f, fmt, __VA_ARGS__); \
-				fprintf(f, "\n"); \
-				fclose(f); \
-			} \
-		} while(0); \
+		FAudio_INTERNAL_LogFormatted(type, fmt, __VA_ARGS__); \
 		FAudio_INTERNAL_debug( \
 			engine, \
 			__FILE__, \
