@@ -507,6 +507,14 @@ static void FAudio_INTERNAL_DecodeBuffers(
 				{
 					buffer = &voice->src.bufferList->buffer;
 					voice->src.curBufferOffset = buffer->PlayBegin;
+					LOG_INFO(
+						voice->audio,
+						"%p: BUFFER_TRANSITION new_buffer=%p play_begin=%u len=%u",
+						(void*)voice,
+						(void*)buffer,
+						buffer->PlayBegin,
+						buffer->PlayLength
+					)
 				}
 				else
 				{
@@ -939,6 +947,13 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	}
 
 	/* Decode... */
+	{
+		FAudioBufferEntry *cur_buf = voice->src.bufferList;
+		uint32_t buf_idx = 0;
+		LOG_INFO(voice->audio, "%p: DECODE_START toDecode=%u curOffset=%u buffers=%u resampleStep=%u",
+			(void*)voice, toDecode, voice->src.curBufferOffset,
+			cur_buf ? 1 : 0, voice->src.resampleStep)
+	}
 	FAudio_INTERNAL_DecodeBuffers(voice, &toDecode);
 
 	/* Subtract any padding samples from the total, if applicable */
@@ -1006,9 +1021,12 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 	{
 		/* Actually, just use the existing buffer... */
 		finalSamples = voice->audio->decodeCache;
+		LOG_INFO(voice->audio, "%p: RESAMPLE_BYPASS (no resampling needed)", (void*)voice)
 	}
 	else
 	{
+		LOG_INFO(voice->audio, "%p: RESAMPLE_ACTIVE resampleStep=0x%x samples=%u",
+			(void*)voice, voice->src.resampleStep, toResample)
 		FAudio_INTERNAL_ResizeResampleCache(
 				voice->audio,
 				voice->src.resampleSamples * voice->src.format->nChannels
@@ -1059,6 +1077,7 @@ sendwork:
 	{
 		FAudio_PlatformLockMutex(voice->filterLock);
 		LOG_MUTEX_LOCK(voice->audio, voice->filterLock)
+		LOG_INFO(voice->audio, "%p: FILTER_APPLY channels=%u mixed=%u", (void*)voice, voice->src.format->nChannels, mixed)
 		FAudio_INTERNAL_FilterVoice(
 			voice->audio,
 			&voice->filter,
@@ -1076,6 +1095,7 @@ sendwork:
 	LOG_MUTEX_LOCK(voice->audio, voice->effectLock)
 	if (voice->effects.count > 0)
 	{
+		LOG_INFO(voice->audio, "%p: EFFECTS_PROCESS count=%u mixed_before=%u", (void*)voice, voice->effects.count, mixed)
 		/* If we didn't get the full size of the update, we have to fill
 		 * it with silence so the effect can process a whole update
 		 */
