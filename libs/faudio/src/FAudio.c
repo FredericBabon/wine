@@ -127,39 +127,91 @@ void FAudio_INTERNAL_LogFlush(void)
 	}
 }
 
-/* Format and log entry with type and timestamp */
+/* Get high-resolution microsecond timestamp */
+uint64_t FAudio_INTERNAL_GetMicroseconds(void)
+{
+#ifdef FAUDIO_WIN32_PLATFORM
+	static uint64_t freq = 0;
+	LARGE_INTEGER li;
+	
+	if (freq == 0)
+	{
+		QueryPerformanceFrequency(&li);
+		freq = li.QuadPart / 1000000ULL;  /* Convert to microseconds */
+	}
+	
+	QueryPerformanceCounter(&li);
+	return li.QuadPart / freq;
+#else
+	/* Unix/Linux: use clock_gettime with CLOCK_MONOTONIC fallback */
+	struct timespec ts;
+	
+	#ifdef CLOCK_MONOTONIC
+		if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+	#else
+		if (clock_gettime(CLOCK_REALTIME, &ts) == 0)
+	#endif
+	{
+		return ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000ULL;
+	}
+	
+	/* Fallback to gettimeofday if clock_gettime fails */
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return tv.tv_sec * 1000000ULL + tv.tv_usec;
+#endif
+}
+
+/* Get current thread ID */
+uint64_t FAudio_INTERNAL_GetThreadId(void)
+{
+#ifdef FAUDIO_WIN32_PLATFORM
+	return (uint64_t)GetCurrentThreadId();
+#else
+	return (uint64_t)pthread_self();
+#endif
+}
+
+/* Format and log entry with type, timestamp, thread ID, and microseconds */
 void FAudio_INTERNAL_LogFormatted(
 	const char *type,
 	const char *fmt,
 	...)
 {
 	char entry_buf[FAUDIO_LOG_ENTRY_SIZE];
-	char msg_buf[FAUDIO_LOG_ENTRY_SIZE - 64];
+	char msg_buf[FAUDIO_LOG_ENTRY_SIZE - 96];
 	time_t now;
 	struct tm *timeinfo;
 	char timestamp[32];
+	uint64_t us_time;
+	uint64_t thread_id;
 	va_list args;
 	int len;
 	
 	if (!FAudio_g_logbuffer.initialized)
 		return;
 	
-	/* Get current time */
+	/* Get current time with microseconds */
 	now = time(NULL);
 	timeinfo = localtime(&now);
 	strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
+	
+	us_time = FAudio_INTERNAL_GetMicroseconds();
+	thread_id = FAudio_INTERNAL_GetThreadId();
 	
 	/* Format the message part */
 	va_start(args, fmt);
 	FAudio_vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
 	va_end(args);
 	
-	/* Combine timestamp, type, and message */
+	/* Combine timestamp (with microseconds), thread ID, type, and message */
 	FAudio_snprintf(
 		entry_buf,
 		sizeof(entry_buf),
-		"[%s] [%s] %s\n",
+		"[%s.%06llu] [TID=0x%llx] [%s] %s\n",
 		timestamp,
+		us_time % 1000000ULL,
+		thread_id,
 		type,
 		msg_buf
 	);

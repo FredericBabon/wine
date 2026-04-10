@@ -134,6 +134,8 @@ extern void FAudio_Log(char const *msg);
 #else
 #include <stdio.h>
 #include <time.h>
+#include <pthread.h>
+#include <sys/time.h>
 #include <SDL_stdinc.h>
 #include <SDL_assert.h>
 #include <SDL_endian.h>
@@ -621,6 +623,10 @@ void FAudio_INTERNAL_LogShutdown(void);
 void FAudio_INTERNAL_LogFlush(void); /* Force flush buffered entries to disk */
 void FAudio_INTERNAL_LogEntry(const char *entry); /* Append entry to buffer */
 
+/* Get high-resolution timing */
+uint64_t FAudio_INTERNAL_GetMicroseconds(void);
+uint64_t FAudio_INTERNAL_GetThreadId(void);
+
 #ifdef FAUDIO_DISABLE_DEBUGCONFIGURATION
 
 #define LOG_ERROR(engine, fmt, ...) do { } while(0)
@@ -710,6 +716,21 @@ void FAudio_INTERNAL_LogFormatted(
 #define LOG_MUTEX_UNLOCK(engine, mutex) PRINT_DEBUG(engine, LOCKS, "Mutex Unlock", "%p (%s)", mutex, #mutex)
 /* TODO: LOG_MEMORY */
 /* TODO: LOG_STREAMING */
+
+/* Operation timing macros for performance analysis */
+#define LOG_TIMING_START(engine, op_name, context) \
+	do { \
+		uint64_t timing_start_us = FAudio_INTERNAL_GetMicroseconds(); \
+		uint64_t timing_tid = FAudio_INTERNAL_GetThreadId(); \
+		LOG_DETAIL(engine, "TIMING_START op=%s ptr=%p tid=0x%llx us=%llu", op_name, context, timing_tid, timing_start_us); \
+	} while(0)
+
+#define LOG_TIMING_END(engine, op_name, context, duration_us) \
+	do { \
+		uint64_t timing_end_us = FAudio_INTERNAL_GetMicroseconds(); \
+		uint64_t timing_tid = FAudio_INTERNAL_GetThreadId(); \
+		LOG_DETAIL(engine, "TIMING_END op=%s ptr=%p tid=0x%llx us=%llu duration_us=%llu", op_name, context, timing_tid, timing_end_us, duration_us); \
+	} while(0)
 
 #define LOG_FORMAT(engine, waveFormat) \
 	if (engine->debug.TraceMask & FAUDIO_LOG_INFO) \
