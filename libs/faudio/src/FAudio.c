@@ -386,6 +386,10 @@ uint32_t FAudio_Initialize(
 	}
 
 	audio->initFlags = Flags;
+	
+	/* Log initialization parameters */
+	LOG_INFO(audio, "INIT_FLAGS=%u", Flags)
+	LOG_INFO(audio, "PROCESSOR=%u", XAudio2Processor)
 
 	/* FIXME: This is lazy... */
 	audio->decodeCache = (float*) audio->pMalloc(sizeof(float));
@@ -894,6 +898,9 @@ uint32_t FAudio_CreateMasteringVoice(
 	/* Master Properties */
 	(*ppMasteringVoice)->master.inputChannels = InputChannels;
 	(*ppMasteringVoice)->master.inputSampleRate = InputSampleRate;
+
+	/* Log audio format for debugging */
+	LOG_INFO(audio, "MASTER_VOICE_CREATED channels=%u samplerate=%u flags=%u", InputChannels, InputSampleRate, Flags)
 
 	/* Sends/Effects */
 	FAudio_zero(&(*ppMasteringVoice)->sends, sizeof(FAudioVoiceSends));
@@ -2721,11 +2728,23 @@ uint32_t FAudioSourceVoice_Start(
 		return 0;
 	}
 
-
 	FAudio_assert(voice->type == FAUDIO_VOICE_SOURCE);
 
 	FAudio_assert(Flags == 0);
 	voice->src.active = 1;
+	
+	/* Log queue depth at start */
+	{
+		uint32_t buffer_count = 0;
+		FAudioBufferEntry *entry = voice->src.bufferList;
+		while (entry != NULL)
+		{
+			buffer_count++;
+			entry = entry->next;
+		}
+		LOG_INFO(voice->audio, "%p: START with buffer_queue_depth=%u", (void*)voice, buffer_count)
+	}
+	
 	LOG_API_EXIT(voice->audio)
 	return 0;
 }
@@ -2947,6 +2966,19 @@ uint32_t FAudioSourceVoice_SubmitSourceBuffer(
 		(void*) voice,
 		(void*) &entry->buffer
 	)
+	
+	/* Count buffers in queue for underrun detection */
+	{
+		uint32_t buffer_count = 0;
+		FAudioBufferEntry *count_entry = voice->src.bufferList;
+		while (count_entry != NULL)
+		{
+			buffer_count++;
+			count_entry = count_entry->next;
+		}
+		LOG_DETAIL(voice->audio, "%p: buffer_queue_depth=%u active=%u", (void*)voice, buffer_count, voice->src.active)
+	}
+	
 	FAudio_PlatformUnlockMutex(voice->src.bufferLock);
 	LOG_MUTEX_UNLOCK(voice->audio, voice->src.bufferLock)
 	LOG_API_EXIT(voice->audio)
