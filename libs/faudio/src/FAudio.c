@@ -497,7 +497,7 @@ uint32_t FAudio_CreateSourceVoice(
 
 	LOG_API_ENTER(audio)
 	LOG_FORMAT(audio, pSourceFormat)
-
+	
 	*ppSourceVoice = (FAudioSourceVoice*) audio->pMalloc(sizeof(FAudioVoice));
 	FAudio_zero(*ppSourceVoice, sizeof(FAudioSourceVoice));
 	(*ppSourceVoice)->audio = audio;
@@ -515,6 +515,17 @@ uint32_t FAudio_CreateSourceVoice(
 	LOG_MUTEX_CREATE(audio, (*ppSourceVoice)->filterLock)
 	(*ppSourceVoice)->volumeLock = FAudio_PlatformCreateMutex();
 	LOG_MUTEX_CREATE(audio, (*ppSourceVoice)->volumeLock)
+
+	/* Log source voice format for mismatch detection - AFTER ppSourceVoice allocated */
+	LOG_INFO(
+		audio,
+		"SOURCE_VOICE_CREATED voice=%p channels=%u samplerate=%u format=%u flags=%u",
+		(void*)*ppSourceVoice,
+		pSourceFormat->nChannels,
+		pSourceFormat->nSamplesPerSec,
+		pSourceFormat->wFormatTag,
+		Flags
+	)
 
 	/* Source Properties */
 	FAudio_assert(MaxFrequencyRatio <= FAUDIO_MAX_FREQ_RATIO);
@@ -2821,6 +2832,18 @@ uint32_t FAudioSourceVoice_Stop(
 
 	FAudio_assert(voice->type == FAUDIO_VOICE_SOURCE);
 
+	/* Log queue depth before stopping */
+	{
+		uint32_t buffer_count = 0;
+		FAudioBufferEntry *entry = voice->src.bufferList;
+		while (entry != NULL)
+		{
+			buffer_count++;
+			entry = entry->next;
+		}
+		LOG_INFO(voice->audio, "%p: STOP with buffer_queue_depth=%u flags=%u", (void*)voice, buffer_count, Flags)
+	}
+
 	if (Flags & FAUDIO_PLAY_TAILS)
 	{
 		voice->src.active = 2;
@@ -3248,6 +3271,7 @@ uint32_t FAudioSourceVoice_SetSourceSampleRate(
 	uint32_t newDecodeSamples, newResampleSamples;
 
 	LOG_API_ENTER(voice->audio)
+	LOG_INFO(voice->audio, "%p: SetSourceSampleRate old=%u new=%u", (void*)voice, voice->src.format->nSamplesPerSec, NewSourceSampleRate)
 	FAudio_assert(voice->type == FAUDIO_VOICE_SOURCE);
 	FAudio_assert(	NewSourceSampleRate >= FAUDIO_MIN_SAMPLE_RATE &&
 			NewSourceSampleRate <= FAUDIO_MAX_SAMPLE_RATE	);
