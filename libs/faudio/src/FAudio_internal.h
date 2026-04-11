@@ -610,6 +610,8 @@ typedef struct
 	volatile uint32_t write_idx;  /* incremented atomically by log calls */
 	uint32_t flush_idx;           /* incremented only during flush */
 	FAudioMutex lock;
+	FAudioThread thread;
+	int spinning;
 	FILE *logfile;
 	uint8_t initialized;
 } FAudio_LogBuffer;

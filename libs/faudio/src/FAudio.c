@@ -29,11 +29,51 @@
 /* Global logging buffer */
 FAudio_LogBuffer FAudio_g_logbuffer = {0};
 
+/* Background thread for log flushing - Zero-block for audio thread */
+static int32_t FAudio_INTERNAL_LogThreadFunc(void *user)
+{
+	uint32_t count, i, idx;
+	FAudio_LogBuffer *lb = (FAudio_LogBuffer *)user;
+
+	while (lb->spinning)
+	{
+		count = 0;
+		FAudio_PlatformLockMutex(lb->lock);
+		if (lb->initialized && lb->write_idx > lb->flush_idx)
+		{
+			count = lb->write_idx - lb->flush_idx;
+		}
+		FAudio_PlatformUnlockMutex(lb->lock);
+
+		if (count > 0)
+		{
+			for (i = 0; i < count; i++)
+			{
+				idx = (lb->flush_idx + i) % FAUDIO_LOG_BUFFER_SIZE;
+				fprintf(
+					lb->logfile,
+					"%s",
+					lb->buffer + (idx * FAUDIO_LOG_ENTRY_SIZE)
+				);
+			}
+			fflush(lb->logfile);
+
+			FAudio_PlatformLockMutex(lb->lock);
+			lb->flush_idx += count;
+			FAudio_PlatformUnlockMutex(lb->lock);
+		}
+		else
+		{
+			/* No logs to write, sleep 10ms to avoid CPU waste */
+			FAudio_sleep(10);
+		}
+	}
+	return 0;
+}
+
 /* Initialize logging system */
 void FAudio_INTERNAL_LogInit(void)
 {
-	FAudioMutex old_lock = FAudio_g_logbuffer.lock;
-	
 	if (FAudio_g_logbuffer.initialized)
 		return;
 	
@@ -43,6 +83,14 @@ void FAudio_INTERNAL_LogInit(void)
 	FAudio_g_logbuffer.write_idx = 0;
 	FAudio_g_logbuffer.flush_idx = 0;
 	FAudio_g_logbuffer.initialized = 1;
+	FAudio_g_logbuffer.spinning = 1;
+
+	/* Start background log thread */
+	FAudio_g_logbuffer.thread = FAudio_PlatformCreateThread(
+		FAudio_INTERNAL_LogThreadFunc,
+		"FAudioLogThread",
+		&FAudio_g_logbuffer
+	);
 }
 
 /* Shutdown logging system */
@@ -51,6 +99,12 @@ void FAudio_INTERNAL_LogShutdown(void)
 	if (!FAudio_g_logbuffer.initialized)
 		return;
 	
+	FAudio_g_logbuffer.spinning = 0;
+	if (FAudio_g_logbuffer.thread)
+	{
+		FAudio_PlatformWaitThread(FAudio_g_logbuffer.thread, NULL);
+	}
+
 	FAudio_INTERNAL_LogFlush();
 	
 	FAudio_PlatformLockMutex(FAudio_g_logbuffer.lock);
@@ -82,11 +136,11 @@ void FAudio_INTERNAL_LogEntry(const char *entry)
 	idx = FAudio_g_logbuffer.write_idx % FAUDIO_LOG_BUFFER_SIZE;
 	available = (FAUDIO_LOG_BUFFER_SIZE - (FAudio_g_logbuffer.write_idx - FAudio_g_logbuffer.flush_idx));
 	
-	/* If buffer is 80% full, flush before writing */
-	if (available < (FAUDIO_LOG_BUFFER_SIZE / 5))
+	/* If buffer is very full, we skip instead of blocking! (Safety for Audio Thread) */
+	if (available < 10)
 	{
-		FAudio_INTERNAL_LogFlush();
-		idx = FAudio_g_logbuffer.write_idx % FAUDIO_LOG_BUFFER_SIZE;
+		FAudio_PlatformUnlockMutex(FAudio_g_logbuffer.lock);
+		return;
 	}
 	
 	/* Copy entry into buffer slot */
@@ -180,22 +234,14 @@ void FAudio_INTERNAL_LogFormatted(
 {
 	char entry_buf[FAUDIO_LOG_ENTRY_SIZE];
 	char msg_buf[FAUDIO_LOG_ENTRY_SIZE - 96];
-	time_t now;
-	struct tm *timeinfo;
-	char timestamp[32];
 	uint64_t us_time;
 	uint64_t thread_id;
 	va_list args;
-	int len;
 	
 	if (!FAudio_g_logbuffer.initialized)
 		return;
 	
-	/* Get current time with microseconds */
-	now = time(NULL);
-	timeinfo = localtime(&now);
-	strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
-	
+	/* Simplified non-blocking timestamp: Raw microseconds since engine start */
 	us_time = FAudio_INTERNAL_GetMicroseconds();
 	thread_id = FAudio_INTERNAL_GetThreadId();
 	
@@ -204,13 +250,13 @@ void FAudio_INTERNAL_LogFormatted(
 	FAudio_vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
 	va_end(args);
 	
-	/* Combine timestamp (with microseconds), thread ID, type, and message */
+	/* Combine timestamp (raw microseconds), thread ID, type, and message */
+	/* Removing localtime/time/strftime for zero-blocking performance */
 	FAudio_snprintf(
 		entry_buf,
 		sizeof(entry_buf),
-		"[%s.%06llu] [TID=0x%llx] [%s] %s\n",
-		timestamp,
-		us_time % 1000000ULL,
+		"[%llu] [TID=0x%llx] [%s] %s\n",
+		us_time,
 		thread_id,
 		type,
 		msg_buf
