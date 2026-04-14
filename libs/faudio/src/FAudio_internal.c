@@ -369,6 +369,12 @@ static void FAudio_INTERNAL_DecodeBuffers(
 
 	LOG_FUNC_ENTER(voice->audio)
 
+	/* Signal smoothing if a new buffer is starting */
+	if (voice->src.newBuffer)
+	{
+		voice->src.smoothingRequest = 1;
+	}
+
 	/* This should never go past the max ratio size */
 	FAudio_assert(*toDecode <= voice->src.decodeSamples);
 
@@ -951,10 +957,43 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
 		FAudioBufferEntry *cur_buf = voice->src.bufferList;
 		uint32_t buf_idx = 0;
 		LOG_INFO(voice->audio, "%p: DECODE_START toDecode=%u curOffset=%u buffers=%u resampleStep=%u",
-			(void*)voice, toDecode, voice->src.curBufferOffset,
-			cur_buf ? 1 : 0, voice->src.resampleStep)
+			(void*)voice, (uint32_t)toDecode, voice->src.curBufferOffset,
+			cur_buf ? 1 : 0, (uint32_t)voice->src.resampleStep)
 	}
 	FAudio_INTERNAL_DecodeBuffers(voice, &toDecode);
+
+	/* [ANTI-CLICK SMOOTHING APPLY] */
+	if (voice->src.smoothingRequest && voice->src.smoothingLastSamples != NULL)
+	{
+		uint32_t c, s;
+		uint32_t channels = voice->src.smoothingChannels;
+		uint32_t fadeFrames = FAudio_min(128, (uint32_t)toDecode);
+		float *cache = voice->audio->decodeCache;
+		float *last = voice->src.smoothingLastSamples;
+		for (s = 0; s < fadeFrames; s++)
+		{
+			float alpha = (float)s / (float)fadeFrames;
+			for (c = 0; c < channels; c++)
+			{
+				cache[s * channels + c] = (last[s * channels + c] * (1.0f - alpha)) + (cache[s * channels + c] * alpha);
+			}
+		}
+		voice->src.smoothingRequest = 0;
+	}
+
+	/* [ANTI-CLICK LOOKBACK UPDATE] */
+	if (voice->src.smoothingLastSamples != NULL && toDecode > 0)
+	{
+		uint32_t channels = voice->src.smoothingChannels;
+		uint32_t copyFrames = FAudio_min(256, (uint32_t)toDecode);
+		float *cache = voice->audio->decodeCache;
+		float *last = voice->src.smoothingLastSamples;
+		FAudio_memcpy(
+			last, 
+			&cache[(toDecode - copyFrames) * channels], 
+			copyFrames * channels * sizeof(float)
+		);
+	}
 
 	/* Subtract any padding samples from the total, if applicable */
 	if (	voice->src.curBufferOffsetDec > 0 &&

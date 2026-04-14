@@ -548,6 +548,11 @@ struct FAudioVoice
 			FAudioBufferEntry *bufferList;
 			FAudioBufferEntry *flushList;
 			FAudioMutex bufferLock;
+
+			/* Anti-Click Smoothing */
+			float *smoothingLastSamples;
+			uint32_t smoothingChannels;
+			uint8_t smoothingRequest;
 		} src;
 		struct
 		{
