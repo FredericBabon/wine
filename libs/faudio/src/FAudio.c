@@ -688,17 +688,6 @@ uint32_t FAudio_CreateSourceVoice(
 	(*ppSourceVoice)->src.bufferLock = FAudio_PlatformCreateMutex();
 	LOG_MUTEX_CREATE(audio, (*ppSourceVoice)->src.bufferLock)
 
-	/* Anti-Click Smoothing Init */
-	(*ppSourceVoice)->src.smoothingChannels = (*ppSourceVoice)->src.format->nChannels;
-	(*ppSourceVoice)->src.smoothingLastSamples = (float*) audio->pMalloc(
-		sizeof(float) * (*ppSourceVoice)->src.smoothingChannels * 256
-	);
-	FAudio_zero(
-		(*ppSourceVoice)->src.smoothingLastSamples,
-		sizeof(float) * (*ppSourceVoice)->src.smoothingChannels * 256
-	);
-	(*ppSourceVoice)->src.smoothingRequest = 0;
-
 	if ((*ppSourceVoice)->src.format->wFormatTag == FAUDIO_FORMAT_EXTENSIBLE)
 	{
 		FAudioWaveFormatExtensible *fmtex = (FAudioWaveFormatExtensible*) (*ppSourceVoice)->src.format;
@@ -2681,10 +2670,6 @@ static void destroy_voice(FAudioVoice *voice)
 			FAudio_WMADEC_free(voice);
 		}
 #endif /* HAVE_WMADEC */
-		if (voice->src.smoothingLastSamples)
-		{
-			voice->audio->pFree(voice->src.smoothingLastSamples);
-		}
 	}
 	else if (voice->type == FAUDIO_VOICE_SUBMIX)
 	{
