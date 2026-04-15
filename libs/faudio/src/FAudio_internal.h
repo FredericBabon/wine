@@ -478,6 +478,15 @@ struct FAudio
 
 	/* Platform opaque pointer */
 	void *platform;
+
+	/* Audio Capture for Debugging (PCM 32F interleaved) */
+	void* captureFile;
+	float* captureBuffer;
+	uint32_t captureReadIdx;
+	uint32_t captureWriteIdx;
+	FAudioMutex captureLock;
+	FAudioThread captureThread;
+	uint8_t captureActive;
 };
 
 struct FAudioVoice

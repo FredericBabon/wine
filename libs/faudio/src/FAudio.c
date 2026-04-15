@@ -468,6 +468,51 @@ uint32_t FAudio_GetDeviceDetails(
 	return result;
 }
 
+/* Binary capture thread - flushes ring buffer to disk without blocking audio */
+#define CAPTURE_BUFFER_SIZE (48000 * 2 * 10) /* 10 seconds of stereo at 48kHz */
+static int32_t FAUDIOCALL FAudio_INTERNAL_CaptureThreadFunc(void* data)
+{
+	FAudio *audio = (FAudio*)data;
+	uint32_t read, write, toWrite;
+	float *buf = audio->captureBuffer;
+	FILE *f = (FILE*)audio->captureFile;
+	
+	while (audio->captureActive)
+	{
+		FAudio_PlatformLockMutex(audio->captureLock);
+		read = audio->captureReadIdx;
+		write = audio->captureWriteIdx;
+		FAudio_PlatformUnlockMutex(audio->captureLock);
+		
+		if (read != write)
+		{
+			if (write > read)
+			{
+				toWrite = write - read;
+				fwrite(buf + read, sizeof(float), toWrite, f);
+				read = write;
+			}
+			else
+			{
+				/* Wrap around */
+				toWrite = CAPTURE_BUFFER_SIZE - read;
+				fwrite(buf + read, sizeof(float), toWrite, f);
+				read = 0;
+			}
+			
+			FAudio_PlatformLockMutex(audio->captureLock);
+			audio->captureReadIdx = read;
+			FAudio_PlatformUnlockMutex(audio->captureLock);
+			fflush(f);
+		}
+		else
+		{
+			FAudio_sleep(10); /* Sleep 10ms if nothing to do */
+		}
+	}
+	return 0;
+}
+
 uint32_t FAudio_Initialize(
 	FAudio *audio,
 	uint32_t Flags,
@@ -488,6 +533,22 @@ uint32_t FAudio_Initialize(
 	/* Log initialization parameters */
 	LOG_INFO(audio, "INIT_FLAGS=%u", Flags)
 	LOG_INFO(audio, "PROCESSOR=%u", XAudio2Processor)
+
+	/* Open async capture system */
+	audio->captureFile = fopen("faudio_capture.raw", "wb");
+	if (audio->captureFile) {
+		audio->captureBuffer = (float*)audio->pMalloc(sizeof(float) * CAPTURE_BUFFER_SIZE);
+		audio->captureReadIdx = 0;
+		audio->captureWriteIdx = 0;
+		audio->captureLock = FAudio_PlatformCreateMutex();
+		audio->captureActive = 1;
+		audio->captureThread = FAudio_PlatformCreateThread(
+			FAudio_INTERNAL_CaptureThreadFunc,
+			"FAudioCaptureThread",
+			audio
+		);
+		LOG_INFO(audio, "Async audio capture started: faudio_capture.raw")
+	}
 
 	/* FIXME: This is lazy... */
 	audio->decodeCache = (float*) audio->pMalloc(sizeof(float));
@@ -1138,6 +1199,28 @@ void FAudio_StopEngine(FAudio *audio)
 	audio->active = 0;
 	FAudio_OPERATIONSET_CommitAll(audio);
 	FAudio_OPERATIONSET_Execute(audio);
+
+	/* Stop the capture thread */
+	if (audio->captureActive)
+	{
+		audio->captureActive = 0;
+		FAudio_PlatformWaitThread(audio->captureThread, NULL);
+		FAudio_PlatformDestroyMutex(audio->captureLock);
+		LOG_INFO(audio, "Async audio capture stopped.")
+	}
+
+	if (audio->captureFile)
+	{
+		fclose((FILE*)audio->captureFile);
+		audio->captureFile = NULL;
+	}
+
+	if (audio->captureBuffer)
+	{
+		audio->pFree(audio->captureBuffer);
+		audio->captureBuffer = NULL;
+	}
+
 	LOG_API_EXIT(audio)
 }
 
@@ -2670,6 +2753,10 @@ static void destroy_voice(FAudioVoice *voice)
 			FAudio_WMADEC_free(voice);
 		}
 #endif /* HAVE_WMADEC */
+		if (voice->src.smoothingLastSamples)
+		{
+			voice->audio->pFree(voice->src.smoothingLastSamples);
+		}
 	}
 	else if (voice->type == FAUDIO_VOICE_SUBMIX)
 	{

@@ -1514,6 +1514,43 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 	{
 		FAudio_INTERNAL_GenerateOutput(audio, output);
 	}
+
+	/* Copy to async capture buffer */
+	if (audio->captureActive && audio->active) {
+		uint32_t outChannels = audio->mixFormat.Format.nChannels;
+		uint32_t samplesCount = audio->updateSize * outChannels;
+		uint32_t writeIdx, readIdx, availableSpace;
+		float *buf = audio->captureBuffer;
+		
+		FAudio_PlatformLockMutex(audio->captureLock);
+		writeIdx = audio->captureWriteIdx;
+		readIdx = audio->captureReadIdx;
+		
+		/* Simple ring buffer "available" calculation */
+		if (writeIdx >= readIdx) {
+			availableSpace = (48000 * 2 * 10) - writeIdx + readIdx - 1;
+		} else {
+			availableSpace = readIdx - writeIdx - 1;
+		}
+
+		if (availableSpace >= samplesCount) {
+			/* Enough space to write */
+			if (writeIdx + samplesCount <= (48000 * 2 * 10)) {
+				/* Contiguous copy */
+				FAudio_memcpy(buf + writeIdx, output, samplesCount * sizeof(float));
+				audio->captureWriteIdx = (writeIdx + samplesCount) % (48000 * 2 * 10);
+			} else {
+				/* Wrap-around copy */
+				uint32_t firstPart = (48000 * 2 * 10) - writeIdx;
+				uint32_t secondPart = samplesCount - firstPart;
+				FAudio_memcpy(buf + writeIdx, output, firstPart * sizeof(float));
+				FAudio_memcpy(buf, output + firstPart, secondPart * sizeof(float));
+				audio->captureWriteIdx = secondPart;
+			}
+		}
+		FAudio_PlatformUnlockMutex(audio->captureLock);
+	}
+
 	LOG_FUNC_EXIT(audio)
 }
 
