@@ -547,7 +547,7 @@ uint32_t FAudio_Initialize(
 			"FAudioCaptureThread",
 			audio
 		);
-		LOG_INFO(audio, "Async audio capture started: faudio_capture.raw")
+		LOG_INFO(audio, "%s", "Async audio capture started: faudio_capture.raw")
 	}
 
 	/* FIXME: This is lazy... */
@@ -1206,7 +1206,7 @@ void FAudio_StopEngine(FAudio *audio)
 		audio->captureActive = 0;
 		FAudio_PlatformWaitThread(audio->captureThread, NULL);
 		FAudio_PlatformDestroyMutex(audio->captureLock);
-		LOG_INFO(audio, "Async audio capture stopped.")
+		LOG_INFO(audio, "%s", "Async audio capture stopped.")
 	}
 
 	if (audio->captureFile)
@@ -2753,10 +2753,6 @@ static void destroy_voice(FAudioVoice *voice)
 			FAudio_WMADEC_free(voice);
 		}
 #endif /* HAVE_WMADEC */
-		if (voice->src.smoothingLastSamples)
-		{
-			voice->audio->pFree(voice->src.smoothingLastSamples);
-		}
 	}
 	else if (voice->type == FAUDIO_VOICE_SUBMIX)
 	{
