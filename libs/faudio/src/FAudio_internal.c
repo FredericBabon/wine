@@ -1531,7 +1531,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 		/* Ne rien faire ! On ne remplit pas le dejitterBuffer,
 		 * donc le temps "audio" s'arrête en attendant les vrais samples.
 		 */
-		LOG_INFO(audio, "DE-JITTER: Silence skipped (10ms)")
+		LOG_INFO(audio, "%s", "DE-JITTER: Silence skipped (10ms)");
 	} else {
 		/* On a du son valide, on le met dans notre buffer de 50ms */
 		if (audio->dejitterCount + samplesCount <= audio->dejitterMax) {
