@@ -470,45 +470,78 @@ uint32_t FAudio_GetDeviceDetails(
 
 /* Binary capture thread - flushes ring buffer to disk without blocking audio */
 #define CAPTURE_BUFFER_SIZE (48000 * 2 * 10) /* 10 seconds of stereo at 48kHz */
-static int32_t FAUDIOCALL FAudio_INTERNAL_CaptureThreadFunc(void* data)
-{
-	FAudio *audio = (FAudio*)data;
+
+static void FAudio_INTERNAL_CaptureWrite(
+	float *buffer,
+	uint32_t *readIdx,
+	uint32_t *writeIdx,
+	FAudioMutex lock,
+	FILE *f,
+	const char *label,
+	uint8_t *active
+) {
 	uint32_t read, write, toWrite;
-	float *buf = audio->captureBuffer;
-	FILE *f = (FILE*)audio->captureFile;
-	
-	while (audio->captureActive)
+	FAudio_PlatformLockMutex(lock);
+	read = *readIdx;
+	write = *writeIdx;
+	FAudio_PlatformUnlockMutex(lock);
+
+	if (read != write)
 	{
-		FAudio_PlatformLockMutex(audio->captureLock);
-		read = audio->captureReadIdx;
-		write = audio->captureWriteIdx;
-		FAudio_PlatformUnlockMutex(audio->captureLock);
-		
-		if (read != write)
+		if (write > read)
 		{
-			if (write > read)
-			{
-				toWrite = write - read;
-				fwrite(buf + read, sizeof(float), toWrite, f);
-				read = write;
-			}
-			else
-			{
-				/* Wrap around */
-				toWrite = CAPTURE_BUFFER_SIZE - read;
-				fwrite(buf + read, sizeof(float), toWrite, f);
-				read = 0;
-			}
-			
-			FAudio_PlatformLockMutex(audio->captureLock);
-			audio->captureReadIdx = read;
-			FAudio_PlatformUnlockMutex(audio->captureLock);
-			fflush(f);
+			toWrite = write - read;
+			fwrite(buffer + read, sizeof(float), toWrite, f);
+			read = write;
 		}
 		else
 		{
-			FAudio_sleep(10); /* Sleep 10ms if nothing to do */
+			toWrite = CAPTURE_BUFFER_SIZE - read;
+			fwrite(buffer + read, sizeof(float), toWrite, f);
+			read = 0;
 		}
+		
+		FAudio_PlatformLockMutex(lock);
+		*readIdx = read;
+		FAudio_PlatformUnlockMutex(lock);
+		fflush(f);
+	}
+}
+
+static int32_t FAUDIOCALL FAudio_INTERNAL_CaptureThreadFunc(void* data)
+{
+	FAudio *audio = (FAudio*)data;
+	while (audio->captureActive)
+	{
+		FAudio_INTERNAL_CaptureWrite(
+			audio->captureBuffer,
+			&audio->captureReadIdx,
+			&audio->captureWriteIdx,
+			audio->captureLock,
+			(FILE*)audio->captureFile,
+			"Main",
+			&audio->captureActive
+		);
+		FAudio_sleep(10);
+	}
+	return 0;
+}
+
+static int32_t FAUDIOCALL FAudio_INTERNAL_CaptureReceivedThreadFunc(void* data)
+{
+	FAudio *audio = (FAudio*)data;
+	while (audio->captureReceivedActive)
+	{
+		FAudio_INTERNAL_CaptureWrite(
+			audio->captureReceivedBuffer,
+			&audio->captureReceivedReadIdx,
+			&audio->captureReceivedWriteIdx,
+			audio->captureReceivedLock,
+			(FILE*)audio->captureReceivedFile,
+			"Received",
+			&audio->captureReceivedActive
+		);
+		FAudio_sleep(10);
 	}
 	return 0;
 }
@@ -534,7 +567,7 @@ uint32_t FAudio_Initialize(
 	LOG_INFO(audio, "INIT_FLAGS=%u", Flags)
 	LOG_INFO(audio, "PROCESSOR=%u", XAudio2Processor)
 
-	/* Open async capture system */
+	/* Open async capture system (Main Output) */
 	audio->captureFile = fopen("faudio_capture.raw", "wb");
 	if (audio->captureFile) {
 		audio->captureBuffer = (float*)audio->pMalloc(sizeof(float) * CAPTURE_BUFFER_SIZE);
@@ -547,7 +580,23 @@ uint32_t FAudio_Initialize(
 			"FAudioCaptureThread",
 			audio
 		);
-		LOG_INFO(audio, "%s", "Async audio capture started: faudio_capture.raw")
+		LOG_INFO(audio, "%s", "Async main audio capture started: faudio_capture.raw")
+	}
+
+	/* Open async capture system (Received Buffers) */
+	audio->captureReceivedFile = fopen("faudio_received.raw", "wb");
+	if (audio->captureReceivedFile) {
+		audio->captureReceivedBuffer = (float*)audio->pMalloc(sizeof(float) * CAPTURE_BUFFER_SIZE);
+		audio->captureReceivedReadIdx = 0;
+		audio->captureReceivedWriteIdx = 0;
+		audio->captureReceivedLock = FAudio_PlatformCreateMutex();
+		audio->captureReceivedActive = 1;
+		audio->captureReceivedThread = FAudio_PlatformCreateThread(
+			FAudio_INTERNAL_CaptureReceivedThreadFunc,
+			"FAudioReceivedThread",
+			audio
+		);
+		LOG_INFO(audio, "%s", "Async received audio capture started: faudio_received.raw")
 	}
 
 	/* FIXME: This is lazy... */
@@ -1209,16 +1258,36 @@ void FAudio_StopEngine(FAudio *audio)
 		LOG_INFO(audio, "%s", "Async audio capture stopped.")
 	}
 
+	if (audio->captureReceivedActive)
+	{
+		audio->captureReceivedActive = 0;
+		FAudio_PlatformWaitThread(audio->captureReceivedThread, NULL);
+		FAudio_PlatformDestroyMutex(audio->captureReceivedLock);
+		LOG_INFO(audio, "%s", "Async received audio capture stopped.")
+	}
+
 	if (audio->captureFile)
 	{
 		fclose((FILE*)audio->captureFile);
 		audio->captureFile = NULL;
 	}
 
+	if (audio->captureReceivedFile)
+	{
+		fclose((FILE*)audio->captureReceivedFile);
+		audio->captureReceivedFile = NULL;
+	}
+
 	if (audio->captureBuffer)
 	{
 		audio->pFree(audio->captureBuffer);
 		audio->captureBuffer = NULL;
+	}
+
+	if (audio->captureReceivedBuffer)
+	{
+		audio->pFree(audio->captureReceivedBuffer);
+		audio->captureReceivedBuffer = NULL;
 	}
 
 	LOG_API_EXIT(audio)
@@ -3022,6 +3091,38 @@ uint32_t FAudioSourceVoice_SubmitSourceBuffer(
 	playLength = pBuffer->PlayLength;
 	loopBegin = pBuffer->LoopBegin;
 	loopLength = pBuffer->LoopLength;
+
+	/* Record received buffer to received capture (PCM 32F ONLY) */
+	if (voice->audio->captureReceivedActive && voice->src.format->wBitsPerSample == 32)
+	{
+		uint32_t samplesCount = pBuffer->AudioBytes / sizeof(float);
+		uint32_t writeIdx, readIdx, availableSpace;
+		float *buf = voice->audio->captureReceivedBuffer;
+		
+		FAudio_PlatformLockMutex(voice->audio->captureReceivedLock);
+		writeIdx = voice->audio->captureReceivedWriteIdx;
+		readIdx = voice->audio->captureReceivedReadIdx;
+		
+		if (writeIdx >= readIdx) {
+			availableSpace = CAPTURE_BUFFER_SIZE - writeIdx + readIdx - 1;
+		} else {
+			availableSpace = readIdx - writeIdx - 1;
+		}
+
+		if (availableSpace >= samplesCount) {
+			if (writeIdx + samplesCount <= CAPTURE_BUFFER_SIZE) {
+				FAudio_memcpy(buf + writeIdx, pBuffer->pAudioData, samplesCount * sizeof(float));
+				voice->audio->captureReceivedWriteIdx = (writeIdx + samplesCount) % CAPTURE_BUFFER_SIZE;
+			} else {
+				uint32_t firstPart = CAPTURE_BUFFER_SIZE - writeIdx;
+				uint32_t secondPart = samplesCount - firstPart;
+				FAudio_memcpy(buf + writeIdx, pBuffer->pAudioData, firstPart * sizeof(float));
+				FAudio_memcpy(buf, (const float*)pBuffer->pAudioData + firstPart, secondPart * sizeof(float));
+				voice->audio->captureReceivedWriteIdx = secondPart;
+			}
+		}
+		FAudio_PlatformUnlockMutex(voice->audio->captureReceivedLock);
+	}
 
 	/* "LoopBegin/LoopLength must be zero if LoopCount is 0" */
 	if (pBuffer->LoopCount == 0 && (loopBegin > 0 || loopLength > 0))

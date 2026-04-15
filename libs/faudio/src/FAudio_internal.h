@@ -481,12 +481,19 @@ struct FAudio
 
 	/* Audio Capture for Debugging (PCM 32F interleaved) */
 	void* captureFile;
+	void* captureReceivedFile;
 	float* captureBuffer;
+	float* captureReceivedBuffer;
 	uint32_t captureReadIdx;
 	uint32_t captureWriteIdx;
+	uint32_t captureReceivedReadIdx;
+	uint32_t captureReceivedWriteIdx;
 	FAudioMutex captureLock;
+	FAudioMutex captureReceivedLock;
 	FAudioThread captureThread;
+	FAudioThread captureReceivedThread;
 	uint8_t captureActive;
+	uint8_t captureReceivedActive;
 };
 
 struct FAudioVoice
