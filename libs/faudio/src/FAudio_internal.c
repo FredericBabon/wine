@@ -1515,6 +1515,102 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 		FAudio_INTERNAL_GenerateOutput(audio, output);
 	}
 
+	/* ERROR CONCEALMENT (JITTER FILLER) - Frame-by-frame with bidirectional crossfading */
+	{
+		uint32_t channels = audio->mixFormat.Format.nChannels;
+		uint32_t framesCount = audio->updateSize;
+		uint32_t crossfadeDuration = (48000 * 2) / 1000; /* 2ms = 96 frames */
+		uint8_t prevFrameWasSilent = audio->inSilence;
+		uint32_t prevFrameOffset = 0;
+		
+		/* Process each frame (1 frame = 1 sample per channel) */
+		for (uint32_t frameIdx = 0; frameIdx < framesCount; frameIdx++) {
+			uint32_t frameOffset = frameIdx * channels;
+			
+			/* Detect if frame is silent (all channels == 0.0f) */
+			uint8_t isSilentFrame = 1;
+			for (uint32_t c = 0; c < channels; c++) {
+				if (output[frameOffset + c] != 0.0f) {
+					isSilentFrame = 0;
+					break;
+				}
+			}
+			
+			if (!isSilentFrame) {
+				/* VALID FRAME RECEIVED */
+				
+				/* Transition: silence -> valid (exit silence with crossfade) */
+				if (audio->inSilence) {
+					float crossfadeFactor = 0.0f;
+					if (audio->silenceSamples < crossfadeDuration) {
+						crossfadeFactor = (float)audio->silenceSamples / (float)crossfadeDuration;
+					} else {
+						crossfadeFactor = 1.0f;
+					}
+					
+					/* Blend history with new valid data */
+					for (uint32_t c = 0; c < channels; c++) {
+						float histSample = audio->historyBuffer[(audio->historyReadIdx + c) % audio->historyMax];
+						output[frameOffset + c] = (histSample * (1.0f - crossfadeFactor)) + (output[frameOffset + c] * crossfadeFactor);
+					}
+					audio->historyReadIdx = (audio->historyReadIdx + channels) % audio->historyMax;
+					audio->silenceSamples += channels;
+					
+					if (audio->silenceSamples >= crossfadeDuration) {
+						audio->inSilence = 0;
+						/* CRITICAL: Resynchronize write and read pointers after exit */
+						audio->historyWriteIdx = audio->historyReadIdx;
+						if (frameIdx == 0) {
+							LOG_INFO(audio, "%s", "CONCEALMENT: Recovered from silence");
+						}
+					}
+				}
+				
+				/* Update history with valid data */
+				for (uint32_t c = 0; c < channels; c++) {
+					audio->historyBuffer[(audio->historyWriteIdx + c) % audio->historyMax] = output[frameOffset + c];
+				}
+				audio->historyWriteIdx = (audio->historyWriteIdx + channels) % audio->historyMax;
+				audio->silenceSamples = 0;
+				
+			} else {
+				/* SILENT FRAME RECEIVED */
+				
+				/* Transition: valid -> silence (enter silence with crossfade) */
+				if (!audio->inSilence && frameIdx > 0) {
+					/* Apply crossfade: fade from last valid frame to first replayed history */
+					float crossfadeFactor = 0.0f;  /* Start at 0, fade toward 1 */
+					
+					for (uint32_t c = 0; c < channels; c++) {
+						float lastValidSample = output[prevFrameOffset + c];
+						float firstHistorySample = audio->historyBuffer[(audio->historyReadIdx + c) % audio->historyMax];
+						output[frameOffset + c] = (lastValidSample * (1.0f - crossfadeFactor)) + (firstHistorySample * crossfadeFactor);
+					}
+					
+					audio->historyReadIdx = (audio->historyReadIdx + channels) % audio->historyMax;
+					audio->inSilence = 1;
+					audio->silenceSamples = channels;
+					LOG_INFO(audio, "%s", "CONCEALMENT: Silence detected (entry crossfade)");
+				} else if (audio->inSilence) {
+					/* Continue in silence, fill from history */
+					audio->silenceSamples += channels;
+					
+					if (audio->silenceSamples <= audio->historyMax) {
+						/* Fill from history buffer */
+						for (uint32_t c = 0; c < channels; c++) {
+							output[frameOffset + c] = audio->historyBuffer[(audio->historyReadIdx + c) % audio->historyMax];
+						}
+						audio->historyReadIdx = (audio->historyReadIdx + channels) % audio->historyMax;
+					}
+					/* Else: silenceSamples > historyMax, leave output as 0.0f (intentional silence) */
+				}
+			}
+			
+			prevFrameWasSilent = isSilentFrame;
+			prevFrameOffset = frameOffset;
+		}
+	}
+
 	/* Copy to async capture buffer */
 	if (audio->captureActive && audio->active) {
 		uint32_t outChannels = audio->mixFormat.Format.nChannels;

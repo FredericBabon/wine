@@ -479,6 +479,14 @@ struct FAudio
 	/* Platform opaque pointer */
 	void *platform;
 
+	/* Audio Replacement / History Buffer */
+	float *historyBuffer;
+	uint32_t historyMax;
+	uint32_t historyWriteIdx;
+	uint32_t historyReadIdx;
+	uint32_t silenceSamples;
+	uint8_t inSilence;
+
 	/* Audio Capture for Debugging (PCM 32F interleaved) */
 	void* captureFile;
 	void* captureReceivedFile;

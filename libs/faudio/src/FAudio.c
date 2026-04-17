@@ -438,6 +438,11 @@ uint32_t FAudio_Release(FAudio *audio)
 		FAudio_PlatformDestroyMutex(audio->callbackLock);
 		LOG_MUTEX_DESTROY(audio, audio->operationLock)
 		FAudio_PlatformDestroyMutex(audio->operationLock);
+
+		if (audio->historyBuffer) {
+			audio->pFree(audio->historyBuffer);
+		}
+
 		audio->pFree(audio);
 		FAudio_PlatformRelease();
 	}
@@ -566,6 +571,15 @@ uint32_t FAudio_Initialize(
 	/* Log initialization parameters */
 	LOG_INFO(audio, "INIT_FLAGS=%u", Flags)
 	LOG_INFO(audio, "PROCESSOR=%u", XAudio2Processor)
+
+	/* Initialize audio history buffer for dropout concealment (50ms @ 48kHz stereo) */
+	audio->historyMax = (48000 * 50 / 1000) * 2; /* 4800 samples */
+	audio->historyBuffer = (float*)audio->pMalloc(audio->historyMax * sizeof(float));
+	FAudio_zero(audio->historyBuffer, audio->historyMax * sizeof(float));
+	audio->historyWriteIdx = 0;
+	audio->historyReadIdx = 0;
+	audio->silenceSamples = 0;
+	audio->inSilence = 0;
 
 	/* Open async capture system (Main Output) */
 	audio->captureFile = fopen("faudio_capture.raw", "wb");
