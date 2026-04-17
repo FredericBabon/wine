@@ -599,14 +599,6 @@ uint32_t FAudio_Initialize(
 		LOG_INFO(audio, "%s", "Async received audio capture started: faudio_received.raw")
 	}
 
-	/* Initialize De-Jitter Buffer (50ms)
-	 * 48000Hz * 2 channels * 0.050s = 4800 samples
-	 */
-	audio->dejitterMax = 4800;
-	audio->dejitterCount = 0;
-	audio->dejitterBuffer = (float*) audio->pMalloc(sizeof(float) * audio->dejitterMax);
-	FAudio_zero(audio->dejitterBuffer, sizeof(float) * audio->dejitterMax);
-
 	/* FIXME: This is lazy... */
 	audio->decodeCache = (float*) audio->pMalloc(sizeof(float));
 	audio->resampleCache = (float*) audio->pMalloc(sizeof(float));
@@ -1296,12 +1288,6 @@ void FAudio_StopEngine(FAudio *audio)
 	{
 		audio->pFree(audio->captureReceivedBuffer);
 		audio->captureReceivedBuffer = NULL;
-	}
-
-	if (audio->dejitterBuffer)
-	{
-		audio->pFree(audio->dejitterBuffer);
-		audio->dejitterBuffer = NULL;
 	}
 
 	LOG_API_EXIT(audio)

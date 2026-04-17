@@ -1500,11 +1500,7 @@ static void FAUDIOCALL FAudio_INTERNAL_GenerateOutput(FAudio *audio, float *outp
 
 void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 {
-	uint32_t i;
-	uint8_t is_silence = 1;
-	uint32_t samplesCount = audio->updateSize * audio->mixFormat.Format.nChannels;
 	LOG_FUNC_ENTER(audio)
-
 	if (audio->pClientEngineProc)
 	{
 		audio->pClientEngineProc(
@@ -1517,42 +1513,6 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 	else
 	{
 		FAudio_INTERNAL_GenerateOutput(audio, output);
-	}
-
-	/* DETECTION DU SILENCE (Stall UE5) */
-	for (i = 0; i < samplesCount; i++) {
-		if (output[i] != 0.0f) {
-			is_silence = 0;
-			break;
-		}
-	}
-
-	if (is_silence) {
-		/* Ne rien faire ! On ne remplit pas le dejitterBuffer,
-		 * donc le temps "audio" s'arrête en attendant les vrais samples.
-		 */
-		LOG_INFO(audio, "DE-JITTER: Silence skipped (10ms)")
-	} else {
-		/* On a du son valide, on le met dans notre buffer de 50ms */
-		if (audio->dejitterCount + samplesCount <= audio->dejitterMax) {
-			FAudio_memcpy(audio->dejitterBuffer + audio->dejitterCount, output, samplesCount * sizeof(float));
-			audio->dejitterCount += samplesCount;
-		}
-	}
-
-	/* On ne sort du son vers la carte son QUE si le buffer de 50ms est plein */
-	if (audio->dejitterCount >= audio->dejitterMax) {
-		/* On envoie les 10ms les plus anciennes (début du buffer) vers la sortie audio */
-		FAudio_memcpy(output, audio->dejitterBuffer, samplesCount * sizeof(float));
-		
-		/* On décale le reste du buffer vers la gauche pour faire de la place */
-		audio->dejitterCount -= samplesCount;
-		FAudio_memmove(audio->dejitterBuffer, audio->dejitterBuffer + samplesCount, audio->dejitterCount * sizeof(float));
-	} else {
-		/* Pas assez de données dans le réservoir ! On renvoie du silence à la carte son
-		 * pour ce cycle de 10ms, en attendant d'avoir accumulé 50ms de son réel.
-		 */
-		FAudio_zero(output, samplesCount * sizeof(float));
 	}
 
 	/* Copy to async capture buffer */

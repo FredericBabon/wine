@@ -494,11 +494,6 @@ struct FAudio
 	FAudioThread captureReceivedThread;
 	uint8_t captureActive;
 	uint8_t captureReceivedActive;
-
-	/* De-Jitter Buffer (50ms) */
-	float *dejitterBuffer;
-	uint32_t dejitterCount;
-	uint32_t dejitterMax;
 };
 
 struct FAudioVoice
