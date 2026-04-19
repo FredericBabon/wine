@@ -479,13 +479,34 @@ struct FAudio
 	/* Platform opaque pointer */
 	void *platform;
 
-	/* Audio Replacement / History Buffer */
-	float *historyBuffer;
-	uint32_t historyMax;
-	uint32_t historyWriteIdx;
-	uint32_t historyReadIdx;
-	uint32_t silenceSamples;
-	uint8_t inSilence;
+	/* Audio Replacement / WSOLA (Waveform Similarity-Based Overlap-Add) */
+	float *historyBuffer;                      /* 100ms history @ 48kHz stereo = 9600 samples */
+	uint32_t historyMax;                       /* Capacity of history buffer */
+	uint32_t historyWriteIdx;                  /* Write pointer (advances with valid audio) */
+	
+	/* Double-buffer for last valid segment (20ms window = 1920 samples stereo) */
+	float *wsolaLastValidSegment_Active;       /* Currently being filled with valid audio */
+	float *wsolaLastValidSegment_Snapshot;     /* Snapshot (guaranteed complete 20ms) for pattern matching */
+	uint32_t wsolaSegmentIdx;                  /* Index in Active buffer (0-1920) */
+	uint32_t wsolaSegmentCountdownMs;          /* Milliseconds accumulated (0-20) */
+	
+	/* Silence detection and synthesis */
+	uint32_t wsolaSilenceDurationSamples;      /* Counts silence until 1920 samples (20ms) */
+	uint8_t wsolaState;                        /* 0=normal, 1=detecting silence, 2=synthesizing */
+	
+	/* Synthesis state (persistent across 10ms calls) */
+	uint32_t wsolaSynthesisIdx;                /* Current position in synthesis window (0-1920) */
+	uint32_t wsolaSynthesisStartPos;           /* Snapshot of historyWriteIdx when synthesis started */
+	uint32_t wsolaBestOffset;                  /* Best match offset in history (found via correlation) */
+	float wsolaCurrentSynthSample;             /* Current synthesized sample (for crossfade) */
+	
+	/* Crossfade state */
+	uint32_t wsolaCrossfadeIdx;                /* Crossfade progress (0-960 for 10ms fade) */
+	uint8_t wsolaInCrossfade;                  /* Flag: currently crossfading out of synthesis */
+	
+	/* Window function and constants */
+	float *wsolaHannWindow;                    /* Hann window for WSOLA (20ms) */
+	uint32_t wsolaWindowSize;                  /* 1920 samples @ 48kHz stereo (20ms) */
 
 	/* Audio Capture for Debugging (PCM 32F interleaved) */
 	void* captureFile;

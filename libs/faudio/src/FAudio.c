@@ -442,6 +442,15 @@ uint32_t FAudio_Release(FAudio *audio)
 		if (audio->historyBuffer) {
 			audio->pFree(audio->historyBuffer);
 		}
+		if (audio->wsolaLastValidSegment_Active) {
+			audio->pFree(audio->wsolaLastValidSegment_Active);
+		}
+		if (audio->wsolaLastValidSegment_Snapshot) {
+			audio->pFree(audio->wsolaLastValidSegment_Snapshot);
+		}
+		if (audio->wsolaHannWindow) {
+			audio->pFree(audio->wsolaHannWindow);
+		}
 
 		audio->pFree(audio);
 		FAudio_PlatformRelease();
@@ -572,14 +581,45 @@ uint32_t FAudio_Initialize(
 	LOG_INFO(audio, "INIT_FLAGS=%u", Flags)
 	LOG_INFO(audio, "PROCESSOR=%u", XAudio2Processor)
 
-	/* Initialize audio history buffer for dropout concealment (50ms @ 48kHz stereo) */
-	audio->historyMax = (48000 * 50 / 1000) * 2; /* 4800 samples */
+	/* WSOLA: Initialize buffers for Waveform Similarity-Based Overlap-Add */
+	/* History buffer: 100ms @ 48kHz stereo = 9600 samples */
+	audio->historyMax = (48000 * 100 / 1000) * 2;
 	audio->historyBuffer = (float*)audio->pMalloc(audio->historyMax * sizeof(float));
 	FAudio_zero(audio->historyBuffer, audio->historyMax * sizeof(float));
 	audio->historyWriteIdx = 0;
-	audio->historyReadIdx = 0;
-	audio->silenceSamples = 0;
-	audio->inSilence = 0;
+	
+	/* WSOLA window size: 20ms = 1920 samples @ 48kHz stereo */
+	audio->wsolaWindowSize = (48000 * 20 / 1000) * 2;
+	
+	/* Double-buffer for last valid segment */
+	audio->wsolaLastValidSegment_Active = (float*)audio->pMalloc(audio->wsolaWindowSize * sizeof(float));
+	FAudio_zero(audio->wsolaLastValidSegment_Active, audio->wsolaWindowSize * sizeof(float));
+	
+	audio->wsolaLastValidSegment_Snapshot = (float*)audio->pMalloc(audio->wsolaWindowSize * sizeof(float));
+	FAudio_zero(audio->wsolaLastValidSegment_Snapshot, audio->wsolaWindowSize * sizeof(float));
+	
+	audio->wsolaSegmentIdx = 0;
+	audio->wsolaSegmentCountdownMs = 0;
+	
+	/* Hann window for WSOLA */
+	audio->wsolaHannWindow = (float*)audio->pMalloc(audio->wsolaWindowSize * sizeof(float));
+	{
+		uint32_t i;
+		for (i = 0; i < audio->wsolaWindowSize; i++) {
+			float phase = (float)i / (float)(audio->wsolaWindowSize - 1);
+			audio->wsolaHannWindow[i] = 0.5f * (1.0f - FAudio_cosf(2.0f * 3.14159265359f * phase));
+		}
+	}
+	
+	/* WSOLA state machine initialization */
+	audio->wsolaState = 0;                     /* 0=normal, 1=detecting silence, 2=synthesizing */
+	audio->wsolaSilenceDurationSamples = 0;
+	audio->wsolaSynthesisIdx = 0;
+	audio->wsolaSynthesisStartPos = 0;
+	audio->wsolaBestOffset = 0;
+	audio->wsolaCurrentSynthSample = 0.0f;
+	audio->wsolaCrossfadeIdx = 0;
+	audio->wsolaInCrossfade = 0;
 
 	/* Open async capture system (Main Output) */
 	audio->captureFile = fopen("faudio_capture.raw", "wb");

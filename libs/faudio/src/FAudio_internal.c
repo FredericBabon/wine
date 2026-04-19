@@ -1498,6 +1498,93 @@ static void FAUDIOCALL FAudio_INTERNAL_GenerateOutput(FAudio *audio, float *outp
 	LOG_FUNC_EXIT(audio)
 }
 
+/* WSOLA HELPER FUNCTIONS */
+
+/* Compute normalized cross-correlation between two buffers */
+static inline float FAudio_INTERNAL_NormalizedCorrelation(
+	const float *signal1,
+	const float *signal2,
+	uint32_t length,
+	uint32_t channels
+) {
+	float dotProduct = 0.0f;
+	float norm1 = 0.0f;
+	float norm2 = 0.0f;
+	uint32_t i;
+
+	for (i = 0; i < length; i++) {
+		dotProduct += signal1[i] * signal2[i];
+		norm1 += signal1[i] * signal1[i];
+		norm2 += signal2[i] * signal2[i];
+	}
+
+	if (norm1 < 1e-10f || norm2 < 1e-10f) {
+		return 0.0f;
+	}
+
+	return dotProduct / (FAudio_sqrtf(norm1) * FAudio_sqrtf(norm2));
+}
+
+/* Find best matching segment in history buffer */
+static uint32_t FAudio_INTERNAL_FindBestSegment(
+	FAudio *audio,
+	const float *targetSegment,
+	uint32_t segmentLength
+) {
+	uint32_t channels = audio->mixFormat.Format.nChannels;
+	uint32_t searchRange = audio->wsolaWindowSize * 3; /* Search within 3 windows back */
+	uint32_t bestOffset = 0;
+	float bestCorr = -2.0f;
+	uint32_t offset;
+	uint32_t compareLength = FAudio_min(segmentLength, 1920);
+
+	/* Search through history buffer for best match */
+	for (offset = 0; offset < searchRange && offset < audio->historyMax; offset += audio->wsolaWindowSize / 2) {
+		uint32_t pos = (audio->historyWriteIdx + audio->historyMax - (offset % audio->historyMax)) % audio->historyMax;
+		float corr;
+
+		/* Wrap-around safe buffer read */
+		float tempBuf[1920]; /* Max WSOLA window size */
+		uint32_t i, readPos;
+		for (i = 0; i < compareLength; i++) {
+			readPos = (pos + i) % audio->historyMax;
+			tempBuf[i] = audio->historyBuffer[readPos];
+		}
+
+		corr = FAudio_INTERNAL_NormalizedCorrelation(targetSegment, tempBuf, compareLength, channels);
+
+		if (corr > bestCorr) {
+			bestCorr = corr;
+			bestOffset = offset;
+		}
+	}
+
+	return bestOffset;
+}
+
+/* Overlap-Add synthesis from history buffer */
+static void FAudio_INTERNAL_WsolaOverlapAdd(
+	FAudio *audio,
+	float *output,
+	uint32_t segmentLength,
+	uint32_t offset
+) {
+	uint32_t i;
+	uint32_t pos;
+	float *window = audio->wsolaHannWindow;
+	uint32_t channels = audio->mixFormat.Format.nChannels;
+
+	/* Reconstruct segment from history with Hann window */
+	for (i = 0; i < segmentLength && i < audio->wsolaWindowSize; i++) {
+		pos = (audio->historyWriteIdx + audio->historyMax - (offset % audio->historyMax) + i) % audio->historyMax;
+		float histSample = audio->historyBuffer[pos];
+		float windowValue = window[i];
+		
+		/* Apply Hann window and overlap with existing output */
+		output[i] = (histSample * windowValue) + (output[i] * (1.0f - windowValue));
+	}
+}
+
 void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 {
 	LOG_FUNC_ENTER(audio)
@@ -1515,99 +1602,334 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 		FAudio_INTERNAL_GenerateOutput(audio, output);
 	}
 
-	/* ERROR CONCEALMENT (JITTER FILLER) - Frame-by-frame with bidirectional crossfading */
+	/* ERROR CONCEALMENT - WSOLA (Waveform Similarity-Based Overlap-Add) */
 	{
 		uint32_t channels = audio->mixFormat.Format.nChannels;
-		uint32_t framesCount = audio->updateSize;
-		uint32_t crossfadeDuration = (48000 * 2) / 1000; /* 2ms = 96 frames */
-		uint8_t prevFrameWasSilent = audio->inSilence;
-		uint32_t prevFrameOffset = 0;
-		
-		/* Process each frame (1 frame = 1 sample per channel) */
-		for (uint32_t frameIdx = 0; frameIdx < framesCount; frameIdx++) {
-			uint32_t frameOffset = frameIdx * channels;
-			
-			/* Detect if frame is silent (all channels == 0.0f) */
-			uint8_t isSilentFrame = 1;
-			for (uint32_t c = 0; c < channels; c++) {
-				if (output[frameOffset + c] != 0.0f) {
-					isSilentFrame = 0;
-					break;
-				}
-			}
-			
-			if (!isSilentFrame) {
-				/* VALID FRAME RECEIVED */
-				
-				/* Transition: silence -> valid (exit silence with crossfade) */
-				if (audio->inSilence) {
-					float crossfadeFactor = 0.0f;
-					if (audio->silenceSamples < crossfadeDuration) {
-						crossfadeFactor = (float)audio->silenceSamples / (float)crossfadeDuration;
+		uint32_t sampleIdx;
+		uint32_t samplesInBuffer = audio->updateSize * channels;
+		uint32_t wsolaSegmentIdxBefore = audio->wsolaSegmentIdx;
+
+		for (sampleIdx = 0; sampleIdx < samplesInBuffer; sampleIdx++) {
+			uint8_t isSilent = (output[sampleIdx] == 0.0f);
+
+			if (audio->wsolaState == 0) {
+				/* STATE 0: NORMAL - Accumulate valid audio and track last segment */
+				if (!isSilent) {
+					/* Optional short release crossfade after short-gap concealment */
+					if (audio->wsolaInCrossfade) {
+						uint32_t shortCrossfadeSamples = channels * 48; /* ~1ms at 48kHz */
+						float fadeFactor;
+
+						if (shortCrossfadeSamples > 0 && audio->wsolaCrossfadeIdx < shortCrossfadeSamples) {
+							fadeFactor = (float) audio->wsolaCrossfadeIdx / (float) shortCrossfadeSamples;
+							output[sampleIdx] = (audio->wsolaCurrentSynthSample * (1.0f - fadeFactor)) + (output[sampleIdx] * fadeFactor);
+							audio->wsolaCrossfadeIdx += 1;
+							if (audio->wsolaCrossfadeIdx >= shortCrossfadeSamples) {
+								audio->wsolaInCrossfade = 0;
+							}
+						} else {
+							audio->wsolaInCrossfade = 0;
+						}
+					}
+
+					/* Store in history buffer */
+					audio->historyBuffer[audio->historyWriteIdx] = output[sampleIdx];
+					audio->historyWriteIdx = (audio->historyWriteIdx + 1) % audio->historyMax;
+					
+					/* Also store in Active segment buffer */
+					if (audio->wsolaSegmentIdx < audio->wsolaWindowSize) {
+						audio->wsolaLastValidSegment_Active[audio->wsolaSegmentIdx] = output[sampleIdx];
+						audio->wsolaSegmentIdx += 1;
+					}
+				} else {
+					/* Silence detected: check if we have a complete 20ms snapshot */
+					if (audio->wsolaSegmentCountdownMs >= 20 && audio->wsolaSegmentIdx >= audio->wsolaWindowSize) {
+						/* Complete 20ms accumulated: snapshot it */
+						FAudio_memcpy(
+							audio->wsolaLastValidSegment_Snapshot,
+							audio->wsolaLastValidSegment_Active,
+							audio->wsolaWindowSize * sizeof(float)
+						);
 					} else {
-						crossfadeFactor = 1.0f;
+						/* Incomplete snapshot: pad with zeros and take what we have */
+						FAudio_zero(audio->wsolaLastValidSegment_Snapshot, audio->wsolaWindowSize * sizeof(float));
+						if (audio->wsolaSegmentIdx > 0) {
+							FAudio_memcpy(
+								audio->wsolaLastValidSegment_Snapshot,
+								audio->wsolaLastValidSegment_Active,
+								audio->wsolaSegmentIdx * sizeof(float)
+							);
+						}
+						LOG_INFO(audio, "WSOLA: Partial snapshot (only %u samples of 1920)", audio->wsolaSegmentIdx);
 					}
-					
-					/* Blend history with new valid data */
-					for (uint32_t c = 0; c < channels; c++) {
-						float histSample = audio->historyBuffer[(audio->historyReadIdx + c) % audio->historyMax];
-						output[frameOffset + c] = (histSample * (1.0f - crossfadeFactor)) + (output[frameOffset + c] * crossfadeFactor);
+					audio->wsolaSilenceDurationSamples = 0;
+					audio->wsolaInCrossfade = 0;
+					audio->wsolaCrossfadeIdx = 0;
+					audio->wsolaSynthesisIdx = 0;
+					audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
+					audio->wsolaBestOffset = 0;
+					audio->wsolaState = 1;
+					LOG_INFO(audio, "%s", "WSOLA: Silence detected, entering State 1 (detecting)");
+				}
+			} 
+			else if (audio->wsolaState == 1) {
+				/* STATE 1: DETECTING SILENCE - Accumulate only actual silence */
+				if (isSilent) {
+					/*
+					 * Hybrid concealment for short holes:
+					 *  - < 3ms: simple interpolation from last valid sample
+					 *  - 3ms..20ms: short WSOLA/mini-OLA using history-only overlap
+					 *  - >= 20ms: existing long WSOLA path below
+					 */
+					uint32_t interpSamples = channels * 144;     /* 3ms @ 48kHz */
+					uint32_t shortWindowSamples = channels * 480; /* 10ms @ 48kHz */
+					uint32_t lastValidPos = (audio->historyWriteIdx + audio->historyMax - 1) % audio->historyMax;
+					uint32_t silenceProgress = audio->wsolaSilenceDurationSamples;
+
+					if (silenceProgress == 0) {
+						LOG_INFO(audio, "%s", "WSOLA-HYBRID: Entering <3ms interpolation branch");
 					}
-					audio->historyReadIdx = (audio->historyReadIdx + channels) % audio->historyMax;
-					audio->silenceSamples += channels;
-					
-					if (audio->silenceSamples >= crossfadeDuration) {
-						audio->inSilence = 0;
-						/* CRITICAL: Resynchronize write and read pointers after exit */
-						audio->historyWriteIdx = audio->historyReadIdx;
-						if (frameIdx == 0) {
-							LOG_INFO(audio, "%s", "CONCEALMENT: Recovered from silence");
+
+					if (silenceProgress < interpSamples) {
+						uint32_t interpReadPos = (
+							audio->historyWriteIdx +
+							audio->historyMax -
+							(interpSamples % audio->historyMax) +
+							(silenceProgress % interpSamples)
+						) % audio->historyMax;
+						float interpFactor = (interpSamples > 0) ?
+							FAudio_min(1.0f, (float) silenceProgress / (float) interpSamples) :
+							1.0f;
+						float lastValidSample = audio->historyBuffer[lastValidPos];
+						float interpSample = audio->historyBuffer[interpReadPos];
+						audio->wsolaCurrentSynthSample = (lastValidSample * (1.0f - interpFactor)) + (interpSample * interpFactor);
+						output[sampleIdx] = audio->wsolaCurrentSynthSample;
+					} else {
+						uint32_t shortPosInWindow;
+						uint32_t readPos;
+						uint32_t baseReadPos;
+						uint32_t overlapPos;
+						uint32_t shortWinIdx;
+						uint32_t hannIdx;
+						float histA;
+						float histB;
+						float overlapWeight;
+
+						if (silenceProgress == interpSamples) {
+							LOG_INFO(audio, "%s", "WSOLA-HYBRID: Switching to 3-20ms short WSOLA branch");
+						}
+
+						/* Seed short WSOLA once when entering the 3-20ms bracket. */
+						if (audio->wsolaSynthesisIdx == 0) {
+							uint32_t i;
+							uint32_t targetStart = (
+								audio->historyWriteIdx +
+								audio->historyMax -
+								(shortWindowSamples % audio->historyMax)
+							) % audio->historyMax;
+
+							for (i = 0; i < shortWindowSamples; i++) {
+								audio->wsolaLastValidSegment_Snapshot[i] = audio->historyBuffer[(targetStart + i) % audio->historyMax];
+							}
+
+							audio->wsolaBestOffset = FAudio_INTERNAL_FindBestSegment(
+								audio,
+								audio->wsolaLastValidSegment_Snapshot,
+								shortWindowSamples
+							);
+							audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
+						}
+
+						shortPosInWindow = (silenceProgress - interpSamples) % shortWindowSamples;
+						baseReadPos = (
+							audio->wsolaSynthesisStartPos +
+							audio->historyMax -
+							(audio->wsolaBestOffset % audio->historyMax)
+						) % audio->historyMax;
+						readPos = (baseReadPos + shortPosInWindow) % audio->historyMax;
+						overlapPos = (
+							audio->historyWriteIdx +
+							audio->historyMax -
+							(shortWindowSamples % audio->historyMax) +
+							shortPosInWindow
+						) % audio->historyMax;
+
+						shortWinIdx = shortPosInWindow % shortWindowSamples;
+						hannIdx = (shortWindowSamples > 0) ?
+							(shortWinIdx * (audio->wsolaWindowSize - 1)) / shortWindowSamples :
+							0;
+
+						histA = audio->historyBuffer[overlapPos];
+						histB = audio->historyBuffer[readPos];
+						overlapWeight = audio->wsolaHannWindow[hannIdx];
+
+						audio->wsolaCurrentSynthSample = (histA * (1.0f - overlapWeight)) + (histB * overlapWeight);
+						output[sampleIdx] = audio->wsolaCurrentSynthSample;
+						audio->wsolaSynthesisIdx += channels;
+						if (audio->wsolaSynthesisIdx >= shortWindowSamples) {
+							audio->wsolaSynthesisIdx = 0;
 						}
 					}
-				}
-				
-				/* Update history with valid data */
-				for (uint32_t c = 0; c < channels; c++) {
-					audio->historyBuffer[(audio->historyWriteIdx + c) % audio->historyMax] = output[frameOffset + c];
-				}
-				audio->historyWriteIdx = (audio->historyWriteIdx + channels) % audio->historyMax;
-				audio->silenceSamples = 0;
-				
-			} else {
-				/* SILENT FRAME RECEIVED */
-				
-				/* Transition: valid -> silence (enter silence with crossfade) */
-				if (!audio->inSilence && frameIdx > 0) {
-					/* Apply crossfade: fade from last valid frame to first replayed history */
-					float crossfadeFactor = 0.0f;  /* Start at 0, fade toward 1 */
+
+					audio->wsolaSilenceDurationSamples += channels;
 					
-					for (uint32_t c = 0; c < channels; c++) {
-						float lastValidSample = output[prevFrameOffset + c];
-						float firstHistorySample = audio->historyBuffer[(audio->historyReadIdx + c) % audio->historyMax];
-						output[frameOffset + c] = (lastValidSample * (1.0f - crossfadeFactor)) + (firstHistorySample * crossfadeFactor);
+					/* When 20ms of silence accumulated, start synthesis */
+					if (audio->wsolaSilenceDurationSamples >= audio->wsolaWindowSize) {
+						/* Find best matching segment in history */
+						uint32_t bestOffset = FAudio_INTERNAL_FindBestSegment(
+							audio,
+							audio->wsolaLastValidSegment_Snapshot,
+							audio->wsolaWindowSize
+						);
+						
+						/* Snapshot synthesis parameters */
+						audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
+						audio->wsolaBestOffset = bestOffset;
+						audio->wsolaSynthesisIdx = 0;
+						audio->wsolaInCrossfade = 0;
+						audio->wsolaCrossfadeIdx = 0;
+						audio->wsolaState = 2;
+						
+						LOG_INFO(
+							audio,
+							"WSOLA: Accumulated 20ms silence, entering State 2 (synthesizing, offset=%u)",
+							bestOffset
+						);
 					}
-					
-					audio->historyReadIdx = (audio->historyReadIdx + channels) % audio->historyMax;
-					audio->inSilence = 1;
-					audio->silenceSamples = channels;
-					LOG_INFO(audio, "%s", "CONCEALMENT: Silence detected (entry crossfade)");
-				} else if (audio->inSilence) {
-					/* Continue in silence, fill from history */
-					audio->silenceSamples += channels;
-					
-					if (audio->silenceSamples <= audio->historyMax) {
-						/* Fill from history buffer */
-						for (uint32_t c = 0; c < channels; c++) {
-							output[frameOffset + c] = audio->historyBuffer[(audio->historyReadIdx + c) % audio->historyMax];
+				} else {
+					/* Gap ended before 20ms: abort concealment and resume normal tracking */
+					if (audio->wsolaSilenceDurationSamples > 0) {
+						uint32_t gapMs = (audio->wsolaSilenceDurationSamples * 1000) / (channels * 48000);
+						if (audio->wsolaSilenceDurationSamples < (channels * 144)) {
+							LOG_INFO(audio, "WSOLA-HYBRID: Gap ended in interpolation branch (%u ms)", gapMs);
+						} else {
+							LOG_INFO(audio, "WSOLA-HYBRID: Gap ended in short WSOLA branch (%u ms)", gapMs);
 						}
-						audio->historyReadIdx = (audio->historyReadIdx + channels) % audio->historyMax;
+
+						/* Start short release crossfade (concealed -> valid) */
+						uint32_t shortCrossfadeSamples = channels * 48; /* ~1ms at 48kHz */
+						float fadeFactor = 0.0f;
+						audio->wsolaInCrossfade = 1;
+						audio->wsolaCrossfadeIdx = 0;
+						if (shortCrossfadeSamples > 0) {
+							fadeFactor = (float) audio->wsolaCrossfadeIdx / (float) shortCrossfadeSamples;
+							output[sampleIdx] = (audio->wsolaCurrentSynthSample * (1.0f - fadeFactor)) + (output[sampleIdx] * fadeFactor);
+							audio->wsolaCrossfadeIdx = 1;
+							if (audio->wsolaCrossfadeIdx >= shortCrossfadeSamples) {
+								audio->wsolaInCrossfade = 0;
+							}
+						}
 					}
-					/* Else: silenceSamples > historyMax, leave output as 0.0f (intentional silence) */
+
+					audio->wsolaState = 0;
+					audio->wsolaSilenceDurationSamples = 0;
+					audio->wsolaSynthesisIdx = 0;
+					
+					/* Process current valid sample in normal path so it is not lost */
+					audio->historyBuffer[audio->historyWriteIdx] = output[sampleIdx];
+					audio->historyWriteIdx = (audio->historyWriteIdx + 1) % audio->historyMax;
+					if (audio->wsolaSegmentIdx < audio->wsolaWindowSize) {
+						audio->wsolaLastValidSegment_Active[audio->wsolaSegmentIdx] = output[sampleIdx];
+						audio->wsolaSegmentIdx += 1;
+					}
 				}
 			}
 			
-			prevFrameWasSilent = isSilentFrame;
-			prevFrameOffset = frameOffset;
+			if (audio->wsolaState == 2) {
+				/* STATE 2: SYNTHESIZING - Fill gap with pattern-matched audio */
+				
+				/* Calculate fixed read position from history */
+				uint32_t readPos = (
+					audio->wsolaSynthesisStartPos +
+					audio->historyMax -
+					(audio->wsolaBestOffset % audio->historyMax) +
+					audio->wsolaSynthesisIdx
+				) % audio->historyMax;
+				float histSample = audio->historyBuffer[readPos];
+				float windowVal = audio->wsolaHannWindow[audio->wsolaSynthesisIdx % audio->wsolaWindowSize];
+				
+				/* Apply Hann window to synthesized sample */
+				audio->wsolaCurrentSynthSample = histSample * windowVal;
+				
+				/* Check if valid audio has resumed */
+				if (!isSilent && !audio->wsolaInCrossfade) {
+					/* Start crossfade from synthesis to valid audio */
+					audio->wsolaInCrossfade = 1;
+					audio->wsolaCrossfadeIdx = 0;
+					LOG_INFO(audio, "%s", "WSOLA: Valid audio resumed, starting crossfade");
+				}
+				
+				if (audio->wsolaInCrossfade) {
+					/* Crossfade: fade from synthesis ? valid audio over 10ms (960 samples) */
+					uint32_t crossfadeSamples = 960;
+					float fadeFactor = (float)audio->wsolaCrossfadeIdx / (float)crossfadeSamples;
+					
+					/* Blend synthesized + valid */
+					output[sampleIdx] = (audio->wsolaCurrentSynthSample * (1.0f - fadeFactor)) 
+					                   + (output[sampleIdx] * fadeFactor);
+					
+					audio->wsolaCrossfadeIdx++;
+					
+					/* Crossfade complete? Return to State 0 */
+					if (audio->wsolaCrossfadeIdx >= crossfadeSamples) {
+						audio->wsolaState = 0;
+						audio->wsolaSegmentIdx = 0;
+						audio->wsolaSegmentCountdownMs = 0;
+						audio->wsolaInCrossfade = 0;
+						LOG_INFO(audio, "%s", "WSOLA: Crossfade complete, returning to State 0");
+						
+						/* Update history with valid audio */
+						audio->historyBuffer[audio->historyWriteIdx] = output[sampleIdx];
+						audio->historyWriteIdx = (audio->historyWriteIdx + 1) % audio->historyMax;
+						
+						/* Reset segment accumulation completely (will be filled fresh in State 0) */
+						FAudio_zero(audio->wsolaLastValidSegment_Active, audio->wsolaWindowSize * sizeof(float));
+						audio->wsolaSegmentIdx = 0;
+						
+						/* Note: Do NOT pre-fill with current sample - let natural State 0 accumulation handle it */
+						/* The current valid sample will be added in next cycle's State 0 processing */
+					}
+				} else {
+					/* No crossfade yet: output synthesized sample */
+					output[sampleIdx] = audio->wsolaCurrentSynthSample;
+					audio->wsolaSynthesisIdx++;
+					
+					/* After 1 window of synthesis, check if silence continues */
+					if (audio->wsolaSynthesisIdx >= audio->wsolaWindowSize) {
+						/* Check if current sample is still silent (gap continues) */
+						if (isSilent) {
+							/* Silence persists: return to State 1 to re-detect and potentially synthesize more */
+							audio->wsolaState = 1;
+							audio->wsolaSilenceDurationSamples = 0;
+							audio->wsolaSynthesisIdx = 0;
+							LOG_INFO(audio, "%s", "WSOLA: Completed 1 synthesis window, silence continues - re-detecting");
+						} else {
+							/* Valid audio resumed after synthesis window - trigger crossfade */
+							audio->wsolaInCrossfade = 1;
+							audio->wsolaCrossfadeIdx = 0;
+							LOG_INFO(audio, "%s", "WSOLA: Synthesis window complete + valid audio, starting crossfade");
+						}
+					}
+				}
+			}
+		}
+
+		/* Track milliseconds only when valid segment accumulation progressed this callback */
+		if (audio->wsolaState == 0 && audio->wsolaSegmentIdx > wsolaSegmentIdxBefore) {
+			audio->wsolaSegmentCountdownMs += 10;
+			
+			/* Every 20ms: snapshot Active ? Snapshot, then reset Active */
+			if (audio->wsolaSegmentCountdownMs >= 20) {
+				FAudio_memcpy(
+					audio->wsolaLastValidSegment_Snapshot,
+					audio->wsolaLastValidSegment_Active,
+					audio->wsolaWindowSize * sizeof(float)
+				);
+				FAudio_zero(audio->wsolaLastValidSegment_Active, audio->wsolaWindowSize * sizeof(float));
+				audio->wsolaSegmentIdx = 0;
+				audio->wsolaSegmentCountdownMs = 0;
+				LOG_INFO(audio, "%s", "WSOLA: Snapshotted 20ms valid segment");
+			}
 		}
 	}
 
