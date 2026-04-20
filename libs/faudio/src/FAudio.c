@@ -615,6 +615,7 @@ uint32_t FAudio_Initialize(
 	audio->wsolaState = 0;                     /* 0=normal, 1=detecting silence, 2=synthesizing */
 	audio->wsolaSilenceDurationSamples = 0;
 	audio->wsolaConcealmentDurationSamples = 0;
+	audio->wsolaValidRunSamples = 0;
 	audio->wsolaSynthesisIdx = 0;
 	audio->wsolaSynthesisStartPos = 0;
 	audio->wsolaBestOffset = 0;

@@ -1606,6 +1606,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 	{
 		uint32_t channels = audio->mixFormat.Format.nChannels;
 		uint32_t maxConcealmentSamples = channels * 2400; /* 50ms @ 48kHz */
+		uint32_t resumeConfirmSamples = channels * 1920;  /* 40ms @ 48kHz */
 		uint32_t sampleIdx;
 		uint32_t samplesInBuffer = audio->updateSize * channels;
 		uint32_t wsolaSegmentIdxBefore = audio->wsolaSegmentIdx;
@@ -1644,6 +1645,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->historyBuffer[audio->historyWriteIdx] = output[sampleIdx];
 					audio->historyWriteIdx = (audio->historyWriteIdx + 1) % audio->historyMax;
 					audio->wsolaHasValidHistory = 1;
+					audio->wsolaValidRunSamples = 0;
 					
 					/* Also store in Active segment buffer */
 					if (audio->wsolaSegmentIdx < audio->wsolaWindowSize) {
@@ -1687,6 +1689,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					}
 					audio->wsolaSilenceDurationSamples = 0;
 					audio->wsolaConcealmentDurationSamples = 0;
+					audio->wsolaValidRunSamples = 0;
 					audio->wsolaInCrossfade = 0;
 					audio->wsolaCrossfadeIdx = 0;
 					audio->wsolaSynthesisIdx = 0;
@@ -1699,6 +1702,8 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 			else if (audio->wsolaState == 1) {
 				/* STATE 1: DETECTING SILENCE - Accumulate only actual silence */
 				if (isSilent) {
+					audio->wsolaValidRunSamples = 0;
+
 					if (!audio->wsolaHasValidHistory) {
 						output[sampleIdx] = 0.0f;
 						audio->wsolaState = 0;
@@ -1808,13 +1813,13 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 
 						audio->wsolaCurrentSynthSample = (histA * (1.0f - overlapWeight)) + (histB * overlapWeight);
 						output[sampleIdx] = audio->wsolaCurrentSynthSample;
-						audio->wsolaSynthesisIdx += channels;
+						audio->wsolaSynthesisIdx += 1;
 						if (audio->wsolaSynthesisIdx >= shortWindowSamples) {
 							audio->wsolaSynthesisIdx = 0;
 						}
 					}
 
-					audio->wsolaSilenceDurationSamples += channels;
+					audio->wsolaSilenceDurationSamples += 1;
 					audio->wsolaConcealmentDurationSamples += 1;
 					
 					/* When 20ms of silence accumulated, start synthesis */
@@ -1841,7 +1846,58 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						);
 					}
 				} else {
-					/* Gap ended before 20ms: abort concealment and resume normal tracking */
+					/*
+					 * Valid resumed, but only exit concealment after a stable run.
+					 * This avoids audible patchwork from rapid valid/silent alternations.
+					 */
+					audio->wsolaValidRunSamples += 1;
+					if (audio->wsolaValidRunSamples < resumeConfirmSamples) {
+						if (audio->wsolaValidRunSamples == 1) {
+							LOG_INFO(audio, "%s", "WSOLA-HYBRID: Suppressing short valid island, keeping concealment");
+						}
+
+						if (audio->wsolaConcealmentDurationSamples >= maxConcealmentSamples) {
+							audio->wsolaState = 0;
+							audio->wsolaIntentionalSilence = 1;
+							audio->wsolaSilenceDurationSamples = 0;
+							audio->wsolaSynthesisIdx = 0;
+							audio->wsolaInCrossfade = 0;
+							audio->wsolaCrossfadeIdx = 0;
+							audio->wsolaCurrentSynthSample = 0.0f;
+							output[sampleIdx] = 0.0f;
+							LOG_INFO(audio, "%s", "WSOLA: Concealment exceeded 50ms while suppressing island, treating silence as intentional");
+							continue;
+						}
+
+						output[sampleIdx] = audio->wsolaCurrentSynthSample;
+						audio->wsolaSilenceDurationSamples += 1;
+						audio->wsolaConcealmentDurationSamples += 1;
+
+						if (audio->wsolaSilenceDurationSamples >= audio->wsolaWindowSize) {
+							uint32_t bestOffset = FAudio_INTERNAL_FindBestSegment(
+								audio,
+								audio->wsolaLastValidSegment_Snapshot,
+								audio->wsolaWindowSize
+							);
+
+							audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
+							audio->wsolaBestOffset = bestOffset;
+							audio->wsolaSynthesisIdx = 0;
+							audio->wsolaInCrossfade = 0;
+							audio->wsolaCrossfadeIdx = 0;
+							audio->wsolaValidRunSamples = 0;
+							audio->wsolaState = 2;
+
+							LOG_INFO(
+								audio,
+								"WSOLA: Accumulated 20ms (with suppressed islands), entering State 2 (synthesizing, offset=%u)",
+								bestOffset
+							);
+						}
+						continue;
+					}
+
+					/* Gap ended after stable valid run: abort concealment and resume normal tracking */
 					if (audio->wsolaSilenceDurationSamples > 0) {
 						uint32_t gapMs = (audio->wsolaConcealmentDurationSamples * 1000) / (channels * 48000);
 						if (audio->wsolaSilenceDurationSamples < (channels * 144)) {
@@ -1868,6 +1924,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaState = 0;
 					audio->wsolaSilenceDurationSamples = 0;
 					audio->wsolaConcealmentDurationSamples = 0;
+					audio->wsolaValidRunSamples = 0;
 					audio->wsolaSynthesisIdx = 0;
 					
 					/* Process current valid sample in normal path so it is not lost */
@@ -1882,10 +1939,15 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 			
 			if (audio->wsolaState == 2) {
 				/* STATE 2: SYNTHESIZING - Fill gap with pattern-matched audio */
+				if (isSilent) {
+					audio->wsolaValidRunSamples = 0;
+				}
+
 				if (isSilent && audio->wsolaConcealmentDurationSamples >= maxConcealmentSamples) {
 					audio->wsolaState = 0;
 					audio->wsolaIntentionalSilence = 1;
 					audio->wsolaSilenceDurationSamples = 0;
+					audio->wsolaValidRunSamples = 0;
 					audio->wsolaSynthesisIdx = 0;
 					audio->wsolaInCrossfade = 0;
 					audio->wsolaCrossfadeIdx = 0;
@@ -1910,10 +1972,22 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 				
 				/* Check if valid audio has resumed */
 				if (!isSilent && !audio->wsolaInCrossfade) {
-					/* Start crossfade from synthesis to valid audio */
-					audio->wsolaInCrossfade = 1;
-					audio->wsolaCrossfadeIdx = 0;
-					LOG_INFO(audio, "%s", "WSOLA: Valid audio resumed, starting crossfade");
+					audio->wsolaValidRunSamples += 1;
+					if (audio->wsolaValidRunSamples >= resumeConfirmSamples) {
+						/* Start crossfade from synthesis to valid audio */
+						audio->wsolaInCrossfade = 1;
+						audio->wsolaCrossfadeIdx = 0;
+						audio->wsolaValidRunSamples = 0;
+						LOG_INFO(audio, "%s", "WSOLA: Stable valid audio resumed, starting crossfade");
+					} else {
+						if (audio->wsolaValidRunSamples == 1) {
+							LOG_INFO(audio, "%s", "WSOLA: Suppressing short valid island during long synthesis");
+						}
+						output[sampleIdx] = audio->wsolaCurrentSynthSample;
+						audio->wsolaConcealmentDurationSamples += 1;
+						audio->wsolaSynthesisIdx++;
+						continue;
+					}
 				}
 				
 				if (audio->wsolaInCrossfade) {
