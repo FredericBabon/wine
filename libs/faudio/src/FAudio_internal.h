@@ -496,6 +496,7 @@ struct FAudio
 	uint32_t wsolaValidRunSamples;             /* Consecutive non-silent samples while concealed */
 	uint8_t wsolaState;                        /* 0=normal, 1=detecting silence, 2=synthesizing */
 	uint8_t wsolaHasValidHistory;              /* Set after first non-silent output reaches history */
+	uint8_t wsolaHasSnapshot;                  /* Set after first full 20ms snapshot is captured */
 	uint8_t wsolaIntentionalSilence;           /* Silence bypass mode after concealment timeout */
 	
 	/* Synthesis state (persistent across 10ms calls) */

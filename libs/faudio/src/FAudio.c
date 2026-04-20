@@ -623,6 +623,7 @@ uint32_t FAudio_Initialize(
 	audio->wsolaCrossfadeIdx = 0;
 	audio->wsolaInCrossfade = 0;
 	audio->wsolaHasValidHistory = 0;
+	audio->wsolaHasSnapshot = 0;
 	audio->wsolaIntentionalSilence = 0;
 
 	/* Open async capture system (Main Output) */

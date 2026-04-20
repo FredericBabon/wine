@@ -1667,16 +1667,19 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						continue;
 					}
 
-					/* Silence detected: check if we have a complete 20ms snapshot */
-					if (audio->wsolaSegmentCountdownMs >= 20 && audio->wsolaSegmentIdx >= audio->wsolaWindowSize) {
-						/* Complete 20ms accumulated: snapshot it */
+					/* Silence detected: keep last full snapshot when available. */
+					if (audio->wsolaHasSnapshot) {
+						/* Reuse previous full snapshot; do not degrade with partial data. */
+					} else if (audio->wsolaSegmentIdx >= audio->wsolaWindowSize) {
+						/* First complete 20ms accumulated: snapshot it */
 						FAudio_memcpy(
 							audio->wsolaLastValidSegment_Snapshot,
 							audio->wsolaLastValidSegment_Active,
 							audio->wsolaWindowSize * sizeof(float)
 						);
+						audio->wsolaHasSnapshot = 1;
 					} else {
-						/* Incomplete snapshot: pad with zeros and take what we have */
+						/* No full snapshot yet: use best-effort partial bootstrap. */
 						FAudio_zero(audio->wsolaLastValidSegment_Snapshot, audio->wsolaWindowSize * sizeof(float));
 						if (audio->wsolaSegmentIdx > 0) {
 							FAudio_memcpy(
@@ -1965,9 +1968,13 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaSynthesisIdx
 				) % audio->historyMax;
 				float histSample = audio->historyBuffer[readPos];
-				float windowVal = audio->wsolaHannWindow[audio->wsolaSynthesisIdx % audio->wsolaWindowSize];
+				float windowVal;
 				
-				/* Apply Hann window to synthesized sample */
+				/*
+				 * Keep long-gap synthesis level-stable.
+				 * Per-sample Hann here can re-introduce near-zero dips each window.
+				 */
+				windowVal = 1.0f;
 				audio->wsolaCurrentSynthSample = histSample * windowVal;
 				
 				/* Check if valid audio has resumed */
@@ -2057,6 +2064,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaLastValidSegment_Active,
 					audio->wsolaWindowSize * sizeof(float)
 				);
+					audio->wsolaHasSnapshot = 1;
 				FAudio_zero(audio->wsolaLastValidSegment_Active, audio->wsolaWindowSize * sizeof(float));
 				audio->wsolaSegmentIdx = 0;
 				audio->wsolaSegmentCountdownMs = 0;
