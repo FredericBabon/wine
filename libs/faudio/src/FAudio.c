@@ -614,12 +614,15 @@ uint32_t FAudio_Initialize(
 	/* WSOLA state machine initialization */
 	audio->wsolaState = 0;                     /* 0=normal, 1=detecting silence, 2=synthesizing */
 	audio->wsolaSilenceDurationSamples = 0;
+	audio->wsolaConcealmentDurationSamples = 0;
 	audio->wsolaSynthesisIdx = 0;
 	audio->wsolaSynthesisStartPos = 0;
 	audio->wsolaBestOffset = 0;
 	audio->wsolaCurrentSynthSample = 0.0f;
 	audio->wsolaCrossfadeIdx = 0;
 	audio->wsolaInCrossfade = 0;
+	audio->wsolaHasValidHistory = 0;
+	audio->wsolaIntentionalSilence = 0;
 
 	/* Open async capture system (Main Output) */
 	audio->captureFile = fopen("faudio_capture.raw", "wb");

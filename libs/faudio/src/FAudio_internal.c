@@ -1605,6 +1605,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 	/* ERROR CONCEALMENT - WSOLA (Waveform Similarity-Based Overlap-Add) */
 	{
 		uint32_t channels = audio->mixFormat.Format.nChannels;
+		uint32_t maxConcealmentSamples = channels * 2400; /* 50ms @ 48kHz */
 		uint32_t sampleIdx;
 		uint32_t samplesInBuffer = audio->updateSize * channels;
 		uint32_t wsolaSegmentIdxBefore = audio->wsolaSegmentIdx;
@@ -1615,6 +1616,13 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 			if (audio->wsolaState == 0) {
 				/* STATE 0: NORMAL - Accumulate valid audio and track last segment */
 				if (!isSilent) {
+					if (audio->wsolaIntentionalSilence) {
+						audio->wsolaIntentionalSilence = 0;
+						audio->wsolaSilenceDurationSamples = 0;
+						audio->wsolaConcealmentDurationSamples = 0;
+						LOG_INFO(audio, "%s", "WSOLA: Intentional silence ended, resuming normal tracking");
+					}
+
 					/* Optional short release crossfade after short-gap concealment */
 					if (audio->wsolaInCrossfade) {
 						uint32_t shortCrossfadeSamples = channels * 48; /* ~1ms at 48kHz */
@@ -1635,6 +1643,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					/* Store in history buffer */
 					audio->historyBuffer[audio->historyWriteIdx] = output[sampleIdx];
 					audio->historyWriteIdx = (audio->historyWriteIdx + 1) % audio->historyMax;
+					audio->wsolaHasValidHistory = 1;
 					
 					/* Also store in Active segment buffer */
 					if (audio->wsolaSegmentIdx < audio->wsolaWindowSize) {
@@ -1642,6 +1651,20 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaSegmentIdx += 1;
 					}
 				} else {
+					if (!audio->wsolaHasValidHistory) {
+						/* Starting from silence: stay silent until we have real audio history. */
+						audio->wsolaSilenceDurationSamples = 0;
+						audio->wsolaConcealmentDurationSamples = 0;
+						audio->wsolaSynthesisIdx = 0;
+						audio->wsolaInCrossfade = 0;
+						continue;
+					}
+
+					if (audio->wsolaIntentionalSilence) {
+						/* Intentional long silence: keep it silent until valid audio returns. */
+						continue;
+					}
+
 					/* Silence detected: check if we have a complete 20ms snapshot */
 					if (audio->wsolaSegmentCountdownMs >= 20 && audio->wsolaSegmentIdx >= audio->wsolaWindowSize) {
 						/* Complete 20ms accumulated: snapshot it */
@@ -1663,6 +1686,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						LOG_INFO(audio, "WSOLA: Partial snapshot (only %u samples of 1920)", audio->wsolaSegmentIdx);
 					}
 					audio->wsolaSilenceDurationSamples = 0;
+					audio->wsolaConcealmentDurationSamples = 0;
 					audio->wsolaInCrossfade = 0;
 					audio->wsolaCrossfadeIdx = 0;
 					audio->wsolaSynthesisIdx = 0;
@@ -1675,6 +1699,25 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 			else if (audio->wsolaState == 1) {
 				/* STATE 1: DETECTING SILENCE - Accumulate only actual silence */
 				if (isSilent) {
+					if (!audio->wsolaHasValidHistory) {
+						output[sampleIdx] = 0.0f;
+						audio->wsolaState = 0;
+						continue;
+					}
+
+					if (audio->wsolaConcealmentDurationSamples >= maxConcealmentSamples) {
+						audio->wsolaState = 0;
+						audio->wsolaIntentionalSilence = 1;
+						audio->wsolaSilenceDurationSamples = 0;
+						audio->wsolaSynthesisIdx = 0;
+						audio->wsolaInCrossfade = 0;
+						audio->wsolaCrossfadeIdx = 0;
+						audio->wsolaCurrentSynthSample = 0.0f;
+						output[sampleIdx] = 0.0f;
+						LOG_INFO(audio, "%s", "WSOLA: Concealment exceeded 50ms, treating silence as intentional");
+						continue;
+					}
+
 					/*
 					 * Hybrid concealment for short holes:
 					 *  - < 3ms: simple interpolation from last valid sample
@@ -1772,6 +1815,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					}
 
 					audio->wsolaSilenceDurationSamples += channels;
+					audio->wsolaConcealmentDurationSamples += 1;
 					
 					/* When 20ms of silence accumulated, start synthesis */
 					if (audio->wsolaSilenceDurationSamples >= audio->wsolaWindowSize) {
@@ -1799,7 +1843,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 				} else {
 					/* Gap ended before 20ms: abort concealment and resume normal tracking */
 					if (audio->wsolaSilenceDurationSamples > 0) {
-						uint32_t gapMs = (audio->wsolaSilenceDurationSamples * 1000) / (channels * 48000);
+						uint32_t gapMs = (audio->wsolaConcealmentDurationSamples * 1000) / (channels * 48000);
 						if (audio->wsolaSilenceDurationSamples < (channels * 144)) {
 							LOG_INFO(audio, "WSOLA-HYBRID: Gap ended in interpolation branch (%u ms)", gapMs);
 						} else {
@@ -1823,6 +1867,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 
 					audio->wsolaState = 0;
 					audio->wsolaSilenceDurationSamples = 0;
+					audio->wsolaConcealmentDurationSamples = 0;
 					audio->wsolaSynthesisIdx = 0;
 					
 					/* Process current valid sample in normal path so it is not lost */
@@ -1837,6 +1882,18 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 			
 			if (audio->wsolaState == 2) {
 				/* STATE 2: SYNTHESIZING - Fill gap with pattern-matched audio */
+				if (isSilent && audio->wsolaConcealmentDurationSamples >= maxConcealmentSamples) {
+					audio->wsolaState = 0;
+					audio->wsolaIntentionalSilence = 1;
+					audio->wsolaSilenceDurationSamples = 0;
+					audio->wsolaSynthesisIdx = 0;
+					audio->wsolaInCrossfade = 0;
+					audio->wsolaCrossfadeIdx = 0;
+					audio->wsolaCurrentSynthSample = 0.0f;
+					output[sampleIdx] = 0.0f;
+					LOG_INFO(audio, "%s", "WSOLA: Long synthesis exceeded 50ms, switching to intentional silence");
+					continue;
+				}
 				
 				/* Calculate fixed read position from history */
 				uint32_t readPos = (
@@ -1892,6 +1949,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 				} else {
 					/* No crossfade yet: output synthesized sample */
 					output[sampleIdx] = audio->wsolaCurrentSynthSample;
+					audio->wsolaConcealmentDurationSamples += 1;
 					audio->wsolaSynthesisIdx++;
 					
 					/* After 1 window of synthesis, check if silence continues */
