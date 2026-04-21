@@ -582,8 +582,8 @@ uint32_t FAudio_Initialize(
 	LOG_INFO(audio, "PROCESSOR=%u", XAudio2Processor)
 
 	/* WSOLA: Initialize buffers for Waveform Similarity-Based Overlap-Add */
-	/* History buffer: 100ms @ 48kHz stereo = 9600 samples */
-	audio->historyMax = (48000 * 100 / 1000) * 2;
+	/* History buffer: 200ms @ 48kHz stereo = 19200 samples */
+	audio->historyMax = (48000 * 200 / 1000) * 2;
 	audio->historyBuffer = (float*)audio->pMalloc(audio->historyMax * sizeof(float));
 	FAudio_zero(audio->historyBuffer, audio->historyMax * sizeof(float));
 	audio->historyWriteIdx = 0;
@@ -622,6 +622,9 @@ uint32_t FAudio_Initialize(
 	audio->wsolaCurrentSynthSample = 0.0f;
 	audio->wsolaCrossfadeIdx = 0;
 	audio->wsolaInCrossfade = 0;
+	audio->wsolaEnteringCrossfade = 0;
+	audio->wsolaEnteringCrossfadeIdx = 0;
+	audio->wsolaLastValidSample = 0.0f;
 	audio->wsolaHasValidHistory = 0;
 	audio->wsolaHasSnapshot = 0;
 	audio->wsolaIntentionalSilence = 0;

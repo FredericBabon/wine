@@ -1698,6 +1698,12 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaSynthesisIdx = 0;
 					audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
 					audio->wsolaBestOffset = 0;
+					
+					/* Prepare entering crossfade: capture last valid sample and init fade counters */
+					audio->wsolaLastValidSample = output[sampleIdx];
+					audio->wsolaEnteringCrossfade = 1;
+					audio->wsolaEnteringCrossfadeIdx = 0;
+					
 					audio->wsolaState = 1;
 					LOG_INFO(audio, "%s", "WSOLA: Silence detected, entering State 1 (detecting)");
 				}
@@ -1755,6 +1761,17 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						float interpSample = audio->historyBuffer[interpReadPos];
 						audio->wsolaCurrentSynthSample = (lastValidSample * (1.0f - interpFactor)) + (interpSample * interpFactor);
 						output[sampleIdx] = audio->wsolaCurrentSynthSample;
+						
+						/* Apply entering crossfade: blend last valid audio with synthesis */
+						if (audio->wsolaEnteringCrossfade) {
+							uint32_t enteringCrossfadeSamples = 960; /* ~10ms @ 48kHz stereo */
+							float enteringFadeFactor = (float) audio->wsolaEnteringCrossfadeIdx / (float) enteringCrossfadeSamples;
+							output[sampleIdx] = (audio->wsolaLastValidSample * (1.0f - enteringFadeFactor)) + (output[sampleIdx] * enteringFadeFactor);
+							audio->wsolaEnteringCrossfadeIdx++;
+							if (audio->wsolaEnteringCrossfadeIdx >= enteringCrossfadeSamples) {
+								audio->wsolaEnteringCrossfade = 0;
+							}
+						}
 					} else {
 						uint32_t shortPosInWindow;
 						uint32_t readPos;
@@ -1816,6 +1833,18 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 
 						audio->wsolaCurrentSynthSample = (histA * (1.0f - overlapWeight)) + (histB * overlapWeight);
 						output[sampleIdx] = audio->wsolaCurrentSynthSample;
+						
+						/* Apply entering crossfade: blend last valid audio with synthesis */
+						if (audio->wsolaEnteringCrossfade) {
+							uint32_t enteringCrossfadeSamples = 960; /* ~10ms @ 48kHz stereo */
+							float enteringFadeFactor = (float) audio->wsolaEnteringCrossfadeIdx / (float) enteringCrossfadeSamples;
+							output[sampleIdx] = (audio->wsolaLastValidSample * (1.0f - enteringFadeFactor)) + (output[sampleIdx] * enteringFadeFactor);
+							audio->wsolaEnteringCrossfadeIdx++;
+							if (audio->wsolaEnteringCrossfadeIdx >= enteringCrossfadeSamples) {
+								audio->wsolaEnteringCrossfade = 0;
+							}
+						}
+						
 						audio->wsolaSynthesisIdx += 1;
 						if (audio->wsolaSynthesisIdx >= shortWindowSamples) {
 							audio->wsolaSynthesisIdx = 0;
@@ -1873,6 +1902,18 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						}
 
 						output[sampleIdx] = audio->wsolaCurrentSynthSample;
+						
+						/* Apply entering crossfade: blend last valid audio with synthesis */
+						if (audio->wsolaEnteringCrossfade) {
+							uint32_t enteringCrossfadeSamples = 960; /* ~10ms @ 48kHz stereo */
+							float enteringFadeFactor = (float) audio->wsolaEnteringCrossfadeIdx / (float) enteringCrossfadeSamples;
+							output[sampleIdx] = (audio->wsolaLastValidSample * (1.0f - enteringFadeFactor)) + (output[sampleIdx] * enteringFadeFactor);
+							audio->wsolaEnteringCrossfadeIdx++;
+							if (audio->wsolaEnteringCrossfadeIdx >= enteringCrossfadeSamples) {
+								audio->wsolaEnteringCrossfade = 0;
+							}
+						}
+						
 						audio->wsolaSilenceDurationSamples += 1;
 						audio->wsolaConcealmentDurationSamples += 1;
 
