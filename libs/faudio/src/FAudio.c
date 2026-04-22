@@ -624,7 +624,6 @@ uint32_t FAudio_Initialize(
 	audio->wsolaInCrossfade = 0;
 	audio->wsolaEnteringCrossfade = 0;
 	audio->wsolaEnteringCrossfadeIdx = 0;
-	audio->wsolaLastValidSample = 0.0f;
 	audio->wsolaHasValidHistory = 0;
 	audio->wsolaHasSnapshot = 0;
 	audio->wsolaIntentionalSilence = 0;
