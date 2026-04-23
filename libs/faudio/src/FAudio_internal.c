@@ -1532,14 +1532,22 @@ static uint32_t FAudio_INTERNAL_FindBestSegment(
 	uint32_t segmentLength
 ) {
 	uint32_t channels = audio->mixFormat.Format.nChannels;
-	uint32_t searchRange = audio->wsolaWindowSize * 3; /* Search within 3 windows back */
-	uint32_t bestOffset = 0;
-	float bestCorr = -2.0f;
+	uint32_t step = audio->wsolaWindowSize / 2; /* 10ms steps */
+	uint32_t baseSearchRange = audio->wsolaWindowSize * 5;      /* Base: 5 windows */
+	uint32_t escalatedSearchRange = audio->wsolaWindowSize * 8; /* Escalation: 8 windows */
+	uint32_t searchRange = (audio->wsolaOffsetRepeatCount >= 2) ? escalatedSearchRange : baseSearchRange;
+	uint32_t maxCandidatesPerSelection = 16; /* Explicit real-time budget */
+	uint32_t bestOffsets[3] = {0, 0, 0};
+	float bestCorrs[3] = {-2.0f, -2.0f, -2.0f};
+	uint32_t selectedOffset;
+	float selectedCorr;
+	uint32_t minSeparation;
+	uint32_t candidatesEvaluated = 0;
 	uint32_t offset;
 	uint32_t compareLength = FAudio_min(segmentLength, 1920);
 
 	/* Search through history buffer for best match */
-	for (offset = 0; offset < searchRange && offset < audio->historyMax; offset += audio->wsolaWindowSize / 2) {
+	for (offset = 0; offset < searchRange && offset < audio->historyMax; offset += step) {
 		uint32_t pos = (audio->historyWriteIdx + audio->historyMax - (offset % audio->historyMax)) % audio->historyMax;
 		float corr;
 
@@ -1553,13 +1561,104 @@ static uint32_t FAudio_INTERNAL_FindBestSegment(
 
 		corr = FAudio_INTERNAL_NormalizedCorrelation(targetSegment, tempBuf, compareLength, channels);
 
-		if (corr > bestCorr) {
-			bestCorr = corr;
-			bestOffset = offset;
+		/* Keep top-3 candidates sorted by correlation (descending). */
+		if (corr > bestCorrs[0]) {
+			bestCorrs[2] = bestCorrs[1];
+			bestOffsets[2] = bestOffsets[1];
+			bestCorrs[1] = bestCorrs[0];
+			bestOffsets[1] = bestOffsets[0];
+			bestCorrs[0] = corr;
+			bestOffsets[0] = offset;
+		} else if (corr > bestCorrs[1]) {
+			bestCorrs[2] = bestCorrs[1];
+			bestOffsets[2] = bestOffsets[1];
+			bestCorrs[1] = corr;
+			bestOffsets[1] = offset;
+		} else if (corr > bestCorrs[2]) {
+			bestCorrs[2] = corr;
+			bestOffsets[2] = offset;
+		}
+
+		candidatesEvaluated += 1;
+		if (candidatesEvaluated >= maxCandidatesPerSelection) {
+			break;
 		}
 	}
 
-	return bestOffset;
+	selectedOffset = bestOffsets[0];
+	selectedCorr = bestCorrs[0];
+	minSeparation = audio->wsolaWindowSize / 2;
+
+	/*
+	 * Anti-repetition: avoid selecting offsets too close to the recent ones
+	 * when an alternative has similar quality.
+	 */
+	if (audio->wsolaHasOffsetHistory) {
+		uint32_t i;
+		uint8_t bestNearLast1 = ((selectedOffset > audio->wsolaLastOffset1) ?
+			(selectedOffset - audio->wsolaLastOffset1) :
+			(audio->wsolaLastOffset1 - selectedOffset)) < minSeparation;
+		uint8_t bestNearLast2 = ((selectedOffset > audio->wsolaLastOffset2) ?
+			(selectedOffset - audio->wsolaLastOffset2) :
+			(audio->wsolaLastOffset2 - selectedOffset)) < minSeparation;
+
+		if (bestNearLast1 || bestNearLast2 || audio->wsolaOffsetRepeatCount >= 2) {
+			for (i = 1; i < 3; i++) {
+				if (bestCorrs[i] <= -1.5f) {
+					continue;
+				}
+				if (bestCorrs[i] >= (bestCorrs[0] - 0.08f)) {
+					uint8_t nearLast1 = ((bestOffsets[i] > audio->wsolaLastOffset1) ?
+						(bestOffsets[i] - audio->wsolaLastOffset1) :
+						(audio->wsolaLastOffset1 - bestOffsets[i])) < minSeparation;
+					uint8_t nearLast2 = ((bestOffsets[i] > audio->wsolaLastOffset2) ?
+						(bestOffsets[i] - audio->wsolaLastOffset2) :
+						(audio->wsolaLastOffset2 - bestOffsets[i])) < minSeparation;
+					if (!nearLast1 && !nearLast2) {
+						selectedOffset = bestOffsets[i];
+						selectedCorr = bestCorrs[i];
+						break;
+					}
+				}
+			}
+		}
+
+		if (((selectedOffset > audio->wsolaLastOffset1) ?
+			(selectedOffset - audio->wsolaLastOffset1) :
+			(audio->wsolaLastOffset1 - selectedOffset)) < minSeparation) {
+			audio->wsolaOffsetRepeatCount += 1;
+		} else {
+			audio->wsolaOffsetRepeatCount = 0;
+		}
+	} else {
+		audio->wsolaOffsetRepeatCount = 0;
+	}
+
+	audio->wsolaLastOffset2 = audio->wsolaLastOffset1;
+	audio->wsolaLastOffset1 = selectedOffset;
+	audio->wsolaHasOffsetHistory = 1;
+	audio->wsolaOffsetSelectionCount += 1;
+
+	/* Throttled debug: periodic, and denser only during repetition streaks. */
+	if (
+		(audio->wsolaOffsetSelectionCount % 128) == 0 ||
+		(audio->wsolaOffsetRepeatCount >= 2 && (audio->wsolaOffsetSelectionCount % 32) == 0)
+	) {
+		LOG_INFO(
+			audio,
+			"WSOLA-OFFSET: sel=%u corr=%.3f top=[%u(%.3f),%u(%.3f),%u(%.3f)] rpt=%u eval=%u rangeWin=%u",
+			selectedOffset,
+			selectedCorr,
+			bestOffsets[0], bestCorrs[0],
+			bestOffsets[1], bestCorrs[1],
+			bestOffsets[2], bestCorrs[2],
+			audio->wsolaOffsetRepeatCount,
+			candidatesEvaluated,
+			(searchRange / audio->wsolaWindowSize)
+		);
+	}
+
+	return selectedOffset;
 }
 
 /* Overlap-Add synthesis from history buffer */

@@ -504,7 +504,12 @@ struct FAudio
 	uint32_t wsolaSynthesisIdx;                /* Current position in synthesis window (0-1920) */
 	uint32_t wsolaSynthesisStartPos;           /* Snapshot of historyWriteIdx when synthesis started */
 	uint32_t wsolaBestOffset;                  /* Best match offset in history (found via correlation) */
+	uint32_t wsolaLastOffset1;                 /* Last selected offset (for anti-repetition) */
+	uint32_t wsolaLastOffset2;                 /* Previous offset before last (for anti-repetition) */
+	uint32_t wsolaOffsetRepeatCount;           /* Repeated/near-identical offset streak length */
+	uint32_t wsolaOffsetSelectionCount;        /* Selection counter for throttled debug logs */
 	float wsolaCurrentSynthSample;             /* Current synthesized sample (for crossfade) */
+	uint8_t wsolaHasOffsetHistory;             /* Offset history initialized */
 	
 	/* Crossfade state */
 	uint32_t wsolaCrossfadeIdx;                /* Crossfade progress (0-960 for 10ms fade) */

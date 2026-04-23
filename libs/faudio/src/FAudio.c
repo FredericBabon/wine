@@ -620,7 +620,12 @@ uint32_t FAudio_Initialize(
 	audio->wsolaSynthesisIdx = 0;
 	audio->wsolaSynthesisStartPos = 0;
 	audio->wsolaBestOffset = 0;
+	audio->wsolaLastOffset1 = 0;
+	audio->wsolaLastOffset2 = 0;
+	audio->wsolaOffsetRepeatCount = 0;
+	audio->wsolaOffsetSelectionCount = 0;
 	audio->wsolaCurrentSynthSample = 0.0f;
+	audio->wsolaHasOffsetHistory = 0;
 	audio->wsolaCrossfadeIdx = 0;
 	audio->wsolaInCrossfade = 0;
 	audio->wsolaEnteringCrossfade = 0;
