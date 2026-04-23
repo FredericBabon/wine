@@ -1712,19 +1712,32 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 		uint32_t samplesInBuffer = audio->updateSize * channels;
 		uint32_t wsolaSegmentIdxBefore = audio->wsolaSegmentIdx;
 
+		uint8_t cachedFrameSilent = 1;
+
 		for (sampleIdx = 0; sampleIdx < samplesInBuffer; sampleIdx++) {
-			uint8_t isSilent = 1;
+			uint8_t isSilent;
 			channelIdx = sampleIdx % channels;
 			frameStart = sampleIdx - channelIdx;
-			{
-				uint32_t ch;
-				for (ch = 0; ch < channels; ch++) {
-					if (output[frameStart + ch] != 0.0f) {
-						isSilent = 0;
-						break;
+			/*
+			 * Compute isSilent only on the first channel of each frame.
+			 * Later channels of the same frame must NOT re-read output[frameStart+0]
+			 * because WSOLA may have already overwritten it during this iteration,
+			 * which would cause false "silent" classification and per-sample
+			 * wsolaValidRunSamples oscillation.
+			 */
+			if (channelIdx == 0) {
+				cachedFrameSilent = 1;
+				{
+					uint32_t ch;
+					for (ch = 0; ch < channels; ch++) {
+						if (output[frameStart + ch] != 0.0f) {
+							cachedFrameSilent = 0;
+							break;
+						}
 					}
 				}
 			}
+			isSilent = cachedFrameSilent;
 
 			if (isSilent) {
 				audio->wsolaPureSilentSamples += 1;
@@ -1793,19 +1806,6 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						/* First complete 20ms accumulated: snapshot it */
 						FAudio_memcpy(
 							audio->wsolaLastValidSegment_Snapshot,
-							audio->wsolaLastValidSegment_Active,
-							audio->wsolaWindowSize * sizeof(float)
-						);
-						audio->wsolaHasSnapshot = 1;
-					} else {
-						/* No full snapshot yet: use best-effort partial bootstrap. */
-						FAudio_zero(audio->wsolaLastValidSegment_Snapshot, audio->wsolaWindowSize * sizeof(float));
-						if (audio->wsolaSegmentIdx > 0) {
-							FAudio_memcpy(
-								audio->wsolaLastValidSegment_Snapshot,
-								audio->wsolaLastValidSegment_Active,
-								audio->wsolaSegmentIdx * sizeof(float)
-							);
 						}
 						LOG_INFO(audio, "WSOLA: Partial snapshot (only %u samples of 1920)", audio->wsolaSegmentIdx);
 					}
@@ -2006,25 +2006,11 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					 */
 					audio->wsolaValidRunSamples += 1;
 					if (audio->wsolaValidRunSamples < resumeConfirmSamples) {
-						if (audio->wsolaValidRunSamples == 1) {
-							LOG_INFO(audio, "%s", "WSOLA-HYBRID: Suppressing short valid island, keeping concealment");
-						}
+					if (audio->wsolaValidRunSamples == 1 && audio->wsolaSilenceDurationSamples == 0) {
+						LOG_INFO(audio, "%s", "WSOLA-HYBRID: Suppressing short valid island, keeping concealment");
+					}
 
 						/*
-						 * Valid island suppression must keep generating evolving samples.
-						 * Reusing a stale synth sample causes audible flat plateaus.
-						 */
-						{
-							uint32_t interpSamples = channels * 144;      /* 3ms @ 48kHz */
-							uint32_t shortWindowSamples = channels * 480; /* 10ms @ 48kHz */
-							uint32_t silenceProgress = audio->wsolaSilenceDurationSamples;
-							if (silenceProgress < interpSamples) {
-								uint32_t lastValidPos = (audio->historyWriteIdx + audio->historyMax - 1) % audio->historyMax;
-								uint32_t interpReadPos = (
-									audio->historyWriteIdx +
-									audio->historyMax -
-									(interpSamples % audio->historyMax) +
-									(silenceProgress % interpSamples)
 								) % audio->historyMax;
 								float interpFactor = (interpSamples > 0) ?
 									FAudio_min(1.0f, (float) silenceProgress / (float) interpSamples) :
