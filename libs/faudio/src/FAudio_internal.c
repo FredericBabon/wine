@@ -1605,7 +1605,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 	/* ERROR CONCEALMENT - WSOLA (Waveform Similarity-Based Overlap-Add) */
 	{
 		uint32_t channels = audio->mixFormat.Format.nChannels;
-		uint32_t maxConcealmentSamples = channels * 2400; /* 50ms @ 48kHz */
+		uint32_t maxPureSilentSamples = channels * 4800; /* 100ms @ 48kHz */
 		uint32_t resumeConfirmSamples = channels * 1920;  /* 40ms @ 48kHz */
 		uint32_t sampleIdx;
 		uint32_t channelIdx;
@@ -1627,6 +1627,12 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 				}
 			}
 
+			if (isSilent) {
+				audio->wsolaPureSilentSamples += 1;
+			} else {
+				audio->wsolaPureSilentSamples = 0;
+			}
+
 			if (audio->wsolaState == 0) {
 				/* STATE 0: NORMAL - Accumulate valid audio and track last segment */
 				if (!isSilent) {
@@ -1634,6 +1640,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaIntentionalSilence = 0;
 						audio->wsolaSilenceDurationSamples = 0;
 						audio->wsolaConcealmentDurationSamples = 0;
+						audio->wsolaPureSilentSamples = 0;
 						LOG_INFO(audio, "%s", "WSOLA: Intentional silence ended, resuming normal tracking");
 					}
 
@@ -1731,7 +1738,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						continue;
 					}
 
-					if (audio->wsolaConcealmentDurationSamples >= maxConcealmentSamples) {
+					if (audio->wsolaPureSilentSamples >= maxPureSilentSamples) {
 						audio->wsolaState = 0;
 						audio->wsolaIntentionalSilence = 1;
 						audio->wsolaSilenceDurationSamples = 0;
@@ -1740,7 +1747,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaCrossfadeIdx = 0;
 						audio->wsolaCurrentSynthSample = 0.0f;
 						output[sampleIdx] = 0.0f;
-						LOG_INFO(audio, "%s", "WSOLA: Concealment exceeded 50ms, treating silence as intentional");
+						LOG_INFO(audio, "%s", "WSOLA: Pure silence exceeded 100ms, treating silence as intentional");
 						continue;
 					}
 
@@ -1904,17 +1911,89 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 							LOG_INFO(audio, "%s", "WSOLA-HYBRID: Suppressing short valid island, keeping concealment");
 						}
 
-						if (audio->wsolaConcealmentDurationSamples >= maxConcealmentSamples) {
-							audio->wsolaState = 0;
-							audio->wsolaIntentionalSilence = 1;
-							audio->wsolaSilenceDurationSamples = 0;
-							audio->wsolaSynthesisIdx = 0;
-							audio->wsolaInCrossfade = 0;
-							audio->wsolaCrossfadeIdx = 0;
-							audio->wsolaCurrentSynthSample = 0.0f;
-							output[sampleIdx] = 0.0f;
-							LOG_INFO(audio, "%s", "WSOLA: Concealment exceeded 50ms while suppressing island, treating silence as intentional");
-							continue;
+						/*
+						 * Valid island suppression must keep generating evolving samples.
+						 * Reusing a stale synth sample causes audible flat plateaus.
+						 */
+						{
+							uint32_t interpSamples = channels * 144;      /* 3ms @ 48kHz */
+							uint32_t shortWindowSamples = channels * 480; /* 10ms @ 48kHz */
+							uint32_t silenceProgress = audio->wsolaSilenceDurationSamples;
+							if (silenceProgress < interpSamples) {
+								uint32_t lastValidPos = (audio->historyWriteIdx + audio->historyMax - 1) % audio->historyMax;
+								uint32_t interpReadPos = (
+									audio->historyWriteIdx +
+									audio->historyMax -
+									(interpSamples % audio->historyMax) +
+									(silenceProgress % interpSamples)
+								) % audio->historyMax;
+								float interpFactor = (interpSamples > 0) ?
+									FAudio_min(1.0f, (float) silenceProgress / (float) interpSamples) :
+									1.0f;
+								float lastValidSample = audio->historyBuffer[lastValidPos];
+								float interpSample = audio->historyBuffer[interpReadPos];
+								audio->wsolaCurrentSynthSample = (lastValidSample * (1.0f - interpFactor)) + (interpSample * interpFactor);
+							} else {
+								uint32_t shortPosInWindow;
+								uint32_t readPos;
+								uint32_t baseReadPos;
+								uint32_t overlapPos;
+								uint32_t shortWinIdx;
+								uint32_t hannIdx;
+								float histA;
+								float histB;
+								float overlapWeight;
+
+								/* Seed short WSOLA when entering the 3-20ms bracket. */
+								if (audio->wsolaSynthesisIdx == 0) {
+									uint32_t i;
+									uint32_t targetStart = (
+										audio->historyWriteIdx +
+										audio->historyMax -
+										(shortWindowSamples % audio->historyMax)
+									) % audio->historyMax;
+
+									for (i = 0; i < shortWindowSamples; i++) {
+										audio->wsolaLastValidSegment_Snapshot[i] = audio->historyBuffer[(targetStart + i) % audio->historyMax];
+									}
+
+									audio->wsolaBestOffset = FAudio_INTERNAL_FindBestSegment(
+										audio,
+										audio->wsolaLastValidSegment_Snapshot,
+										shortWindowSamples
+									);
+									audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
+								}
+
+								shortPosInWindow = (silenceProgress - interpSamples) % shortWindowSamples;
+								baseReadPos = (
+									audio->wsolaSynthesisStartPos +
+									audio->historyMax -
+									(audio->wsolaBestOffset % audio->historyMax)
+								) % audio->historyMax;
+								readPos = (baseReadPos + shortPosInWindow) % audio->historyMax;
+								overlapPos = (
+									audio->historyWriteIdx +
+									audio->historyMax -
+									(shortWindowSamples % audio->historyMax) +
+									shortPosInWindow
+								) % audio->historyMax;
+
+								shortWinIdx = shortPosInWindow % shortWindowSamples;
+								hannIdx = (shortWindowSamples > 0) ?
+									(shortWinIdx * (audio->wsolaWindowSize - 1)) / shortWindowSamples :
+									0;
+
+								histA = audio->historyBuffer[overlapPos];
+								histB = audio->historyBuffer[readPos];
+								overlapWeight = audio->wsolaHannWindow[hannIdx];
+								audio->wsolaCurrentSynthSample = (histA * (1.0f - overlapWeight)) + (histB * overlapWeight);
+
+								audio->wsolaSynthesisIdx += 1;
+								if (audio->wsolaSynthesisIdx >= shortWindowSamples) {
+									audio->wsolaSynthesisIdx = 0;
+								}
+							}
 						}
 
 						output[sampleIdx] = audio->wsolaCurrentSynthSample;
@@ -2005,7 +2084,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaValidRunSamples = 0;
 				}
 
-				if (isSilent && audio->wsolaConcealmentDurationSamples >= maxConcealmentSamples) {
+				if (isSilent && audio->wsolaPureSilentSamples >= maxPureSilentSamples) {
 					audio->wsolaState = 0;
 					audio->wsolaIntentionalSilence = 1;
 					audio->wsolaSilenceDurationSamples = 0;
@@ -2015,7 +2094,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaCrossfadeIdx = 0;
 					audio->wsolaCurrentSynthSample = 0.0f;
 					output[sampleIdx] = 0.0f;
-					LOG_INFO(audio, "%s", "WSOLA: Long synthesis exceeded 50ms, switching to intentional silence");
+					LOG_INFO(audio, "%s", "WSOLA: Pure silence exceeded 100ms during long synthesis, switching to intentional silence");
 					continue;
 				}
 				

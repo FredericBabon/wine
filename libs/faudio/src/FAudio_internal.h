@@ -492,7 +492,8 @@ struct FAudio
 	
 	/* Silence detection and synthesis */
 	uint32_t wsolaSilenceDurationSamples;      /* Counts silence until 1920 samples (20ms) */
-	uint32_t wsolaConcealmentDurationSamples;  /* Actual concealed interleaved samples for long-silence cutoff */
+	uint32_t wsolaConcealmentDurationSamples;  /* Actual concealed interleaved samples (diagnostic/tracking) */
+	uint32_t wsolaPureSilentSamples;           /* Consecutive interleaved samples with all channels at 0 */
 	uint32_t wsolaValidRunSamples;             /* Consecutive non-silent samples while concealed */
 	uint8_t wsolaState;                        /* 0=normal, 1=detecting silence, 2=synthesizing */
 	uint8_t wsolaHasValidHistory;              /* Set after first non-silent output reaches history */
