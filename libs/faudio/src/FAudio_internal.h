@@ -508,7 +508,7 @@ struct FAudio
 	uint32_t wsolaLastOffset2;                 /* Previous offset before last (for anti-repetition) */
 	uint32_t wsolaOffsetRepeatCount;           /* Repeated/near-identical offset streak length */
 	uint32_t wsolaOffsetSelectionCount;        /* Selection counter for throttled debug logs */
-	float wsolaCurrentSynthSample;             /* Current synthesized sample (for crossfade) */
+	float wsolaCurrentSynthSample[FAUDIO_MAX_AUDIO_CHANNELS]; /* Per-channel synthesized sample (for crossfade) */
 	uint8_t wsolaHasOffsetHistory;             /* Offset history initialized */
 	
 	/* Crossfade state */

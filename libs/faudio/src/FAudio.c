@@ -624,7 +624,7 @@ uint32_t FAudio_Initialize(
 	audio->wsolaLastOffset2 = 0;
 	audio->wsolaOffsetRepeatCount = 0;
 	audio->wsolaOffsetSelectionCount = 0;
-	audio->wsolaCurrentSynthSample = 0.0f;
+	FAudio_zero(audio->wsolaCurrentSynthSample, sizeof(audio->wsolaCurrentSynthSample));
 	audio->wsolaHasOffsetHistory = 0;
 	audio->wsolaCrossfadeIdx = 0;
 	audio->wsolaCrossfadeTargetSamples = 0;
