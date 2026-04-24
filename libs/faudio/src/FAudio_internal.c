@@ -2287,11 +2287,25 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					if (audio->wsolaSynthesisIdx >= audio->wsolaWindowSize) {
 						/* Check if current sample is still silent (gap continues) */
 						if (isSilent) {
-							/* Silence persists: return to State 1 to re-detect and potentially synthesize more */
-							audio->wsolaState = 1;
-							audio->wsolaSilenceDurationSamples = 0;
+							/*
+							 * Keep long-gap synthesis continuous instead of bouncing
+							 * back to State 1 every 20ms, which creates audible
+							 * repeating 40ms motifs.
+							 */
+							audio->wsolaSynthesisStartPos = (
+								audio->wsolaSynthesisStartPos + audio->wsolaWindowSize
+							) % audio->historyMax;
+							audio->wsolaBestOffset = FAudio_INTERNAL_FindBestSegment(
+								audio,
+								audio->wsolaLastValidSegment_Snapshot,
+								audio->wsolaWindowSize
+							);
 							audio->wsolaSynthesisIdx = 0;
-							LOG_INFO(audio, "%s", "WSOLA: Completed 1 synthesis window, silence continues - re-detecting");
+							LOG_INFO(
+								audio,
+								"WSOLA: Continuing long synthesis (offset=%u)",
+								audio->wsolaBestOffset
+							);
 						} else {
 							/* Valid audio resumed after synthesis window - trigger crossfade */
 							audio->wsolaInCrossfade = 1;
