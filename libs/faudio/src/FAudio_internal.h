@@ -513,9 +513,12 @@ struct FAudio
 	
 	/* Crossfade state */
 	uint32_t wsolaCrossfadeIdx;                /* Crossfade progress (0-960 for 10ms fade) */
+	uint32_t wsolaCrossfadeTargetSamples;      /* Adaptive synth->valid crossfade length */
 	uint8_t wsolaInCrossfade;                  /* Flag: currently crossfading out of synthesis */
 	uint8_t wsolaEnteringCrossfade;            /* Flag: currently fading IN to synthesis */
 	uint32_t wsolaEnteringCrossfadeIdx;        /* Progress of entering crossfade (0-960 for 10ms) */
+	uint32_t wsolaEnteringCrossfadeTargetSamples; /* Adaptive valid->synth crossfade length */
+	uint32_t wsolaEnteringCrossfadeStartPos;   /* History cursor for entering crossfade */
 	
 	/* Window function and constants */
 	float *wsolaHannWindow;                    /* Hann window for WSOLA (20ms) */
