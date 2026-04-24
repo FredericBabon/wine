@@ -1806,6 +1806,19 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						/* First complete 20ms accumulated: snapshot it */
 						FAudio_memcpy(
 							audio->wsolaLastValidSegment_Snapshot,
+							audio->wsolaLastValidSegment_Active,
+							audio->wsolaWindowSize * sizeof(float)
+						);
+						audio->wsolaHasSnapshot = 1;
+					} else {
+						/* No full snapshot yet: use best-effort partial bootstrap. */
+						FAudio_zero(audio->wsolaLastValidSegment_Snapshot, audio->wsolaWindowSize * sizeof(float));
+						if (audio->wsolaSegmentIdx > 0) {
+							FAudio_memcpy(
+								audio->wsolaLastValidSegment_Snapshot,
+								audio->wsolaLastValidSegment_Active,
+								audio->wsolaSegmentIdx * sizeof(float)
+							);
 						}
 						LOG_INFO(audio, "WSOLA: Partial snapshot (only %u samples of 1920)", audio->wsolaSegmentIdx);
 					}
@@ -2006,11 +2019,25 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					 */
 					audio->wsolaValidRunSamples += 1;
 					if (audio->wsolaValidRunSamples < resumeConfirmSamples) {
-					if (audio->wsolaValidRunSamples == 1 && audio->wsolaSilenceDurationSamples == 0) {
-						LOG_INFO(audio, "%s", "WSOLA-HYBRID: Suppressing short valid island, keeping concealment");
-					}
+						if (audio->wsolaValidRunSamples == 1 && audio->wsolaSilenceDurationSamples == 0) {
+							LOG_INFO(audio, "%s", "WSOLA-HYBRID: Suppressing short valid island, keeping concealment");
+						}
 
 						/*
+						 * Valid island suppression must keep generating evolving samples.
+						 * Reusing a stale synth sample causes audible flat plateaus.
+						 */
+						{
+							uint32_t interpSamples = channels * 144;      /* 3ms @ 48kHz */
+							uint32_t shortWindowSamples = channels * 480; /* 10ms @ 48kHz */
+							uint32_t silenceProgress = audio->wsolaSilenceDurationSamples;
+							if (silenceProgress < interpSamples) {
+								uint32_t lastValidPos = (audio->historyWriteIdx + audio->historyMax - 1) % audio->historyMax;
+								uint32_t interpReadPos = (
+									audio->historyWriteIdx +
+									audio->historyMax -
+									(interpSamples % audio->historyMax) +
+									(silenceProgress % interpSamples)
 								) % audio->historyMax;
 								float interpFactor = (interpSamples > 0) ?
 									FAudio_min(1.0f, (float) silenceProgress / (float) interpSamples) :
@@ -2082,7 +2109,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						}
 
 						output[sampleIdx] = audio->wsolaCurrentSynthSample;
-						
+
 						/* Apply entering crossfade: blend last valid audio with synthesis */
 						if (audio->wsolaEnteringCrossfade) {
 							uint32_t enteringCrossfadeSamples = channels * 480; /* ~10ms @ 48kHz */
@@ -2095,7 +2122,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 								audio->wsolaEnteringCrossfade = 0;
 							}
 						}
-						
+
 						audio->wsolaSilenceDurationSamples += 1;
 						audio->wsolaConcealmentDurationSamples += 1;
 
