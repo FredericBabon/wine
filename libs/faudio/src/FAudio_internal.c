@@ -1773,7 +1773,17 @@ static inline float FAudio_INTERNAL_WsolaApplyEnteringCrossfade(
 
 void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 {
+	uint32_t outChannels = audio->mixFormat.Format.nChannels;
+	uint32_t outputFrames = audio->updateSize;
+	uint32_t outputSamples = outputFrames * outChannels;
+	uint32_t i;
+	uint64_t callbackStartFrame = audio->captureDiagOutputFramesTotal;
 	LOG_FUNC_ENTER(audio)
+
+	if (outChannels == 0) {
+		outChannels = 1;
+		outputSamples = outputFrames;
+	}
 	if (audio->pClientEngineProc)
 	{
 		audio->pClientEngineProc(
@@ -1788,8 +1798,52 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 		FAudio_INTERNAL_GenerateOutput(audio, output);
 	}
 
+	if (!audio->captureDiagOutputFirstSeen && output != NULL && outputSamples > 0) {
+		for (i = 0; i < outputSamples; i += 1) {
+			if (output[i] != 0.0f) {
+				audio->captureDiagOutputFirstSeen = 1;
+				audio->captureDiagOutputChannels = outChannels;
+				audio->captureDiagOutputSampleRate = audio->mixFormat.Format.nSamplesPerSec;
+				audio->captureDiagOutputFirstFrame = callbackStartFrame + (i / outChannels);
+				audio->captureDiagOutputFirstUs = FAudio_INTERNAL_GetMicroseconds();
+				LOG_INFO(
+					audio,
+					"CAPTURE-DIAG: first_nonzero_capture us=%llu frame=%llu sr=%u ch=%u",
+					(unsigned long long) audio->captureDiagOutputFirstUs,
+					(unsigned long long) audio->captureDiagOutputFirstFrame,
+					audio->captureDiagOutputSampleRate,
+					audio->captureDiagOutputChannels
+				);
+				break;
+			}
+		}
+	}
+
+	audio->captureDiagOutputFramesTotal += outputFrames;
+
+	if (
+		audio->captureDiagReceivedFirstSeen &&
+		audio->captureDiagOutputFirstSeen &&
+		!audio->captureDiagDeltaLogged
+	) {
+		int64_t deltaUs = (int64_t) audio->captureDiagOutputFirstUs - (int64_t) audio->captureDiagReceivedFirstUs;
+		int64_t deltaFrames48k = (deltaUs >= 0) ?
+			(int64_t) ((deltaUs * 48000 + 500000) / 1000000) :
+			-(int64_t) (((-deltaUs) * 48000 + 500000) / 1000000);
+		audio->captureDiagDeltaLogged = 1;
+		LOG_INFO(
+			audio,
+			"CAPTURE-DIAG: first_nonzero_delta capture-received us=%lld ms=%.3f frames@48k=%lld (recv_frame=%llu cap_frame=%llu)",
+			(long long) deltaUs,
+			(double) deltaUs / 1000.0,
+			(long long) deltaFrames48k,
+			(unsigned long long) audio->captureDiagReceivedFirstFrame,
+			(unsigned long long) audio->captureDiagOutputFirstFrame
+		);
+	}
+
 	/* ERROR CONCEALMENT - WSOLA (Waveform Similarity-Based Overlap-Add) */
-	{
+	if (!audio->wsolaDisabled) {
 		uint32_t channels = audio->mixFormat.Format.nChannels;
 		uint32_t maxPureSilentSamples = channels * 4800; /* 100ms @ 48kHz */
 		uint32_t resumeConfirmSamples = channels * 1920;  /* 40ms @ 48kHz */
@@ -2453,7 +2507,6 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 
 	/* Copy to async capture buffer */
 	if (audio->captureActive && audio->active) {
-		uint32_t outChannels = audio->mixFormat.Format.nChannels;
 		uint32_t samplesCount = audio->updateSize * outChannels;
 		uint32_t writeIdx, readIdx, availableSpace;
 		float *buf = audio->captureBuffer;

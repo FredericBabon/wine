@@ -565,6 +565,7 @@ uint32_t FAudio_Initialize(
 	uint32_t Flags,
 	FAudioProcessor XAudio2Processor
 ) {
+	const char *env;
 	LOG_API_ENTER(audio)
 	FAudio_assert(Flags == 0 || Flags == FAUDIO_DEBUG_ENGINE);
 	FAudio_assert(XAudio2Processor == FAUDIO_DEFAULT_PROCESSOR);
@@ -636,6 +637,24 @@ uint32_t FAudio_Initialize(
 	audio->wsolaHasValidHistory = 0;
 	audio->wsolaHasSnapshot = 0;
 	audio->wsolaIntentionalSilence = 0;
+	env = FAudio_getenv("FAUDIO_WSOLA_DISABLE");
+	audio->wsolaDisabled = (env != NULL && *env == '1') ? 1 : 0;
+	if (audio->wsolaDisabled) {
+		LOG_INFO(audio, "%s", "WSOLA: disabled via FAUDIO_WSOLA_DISABLE=1")
+	}
+	audio->captureDiagReceivedFirstSeen = 0;
+	audio->captureDiagOutputFirstSeen = 0;
+	audio->captureDiagDeltaLogged = 0;
+	audio->captureDiagReceivedSampleRate = 0;
+	audio->captureDiagOutputSampleRate = 0;
+	audio->captureDiagReceivedChannels = 0;
+	audio->captureDiagOutputChannels = 0;
+	audio->captureDiagReceivedFramesTotal = 0;
+	audio->captureDiagOutputFramesTotal = 0;
+	audio->captureDiagReceivedFirstFrame = 0;
+	audio->captureDiagOutputFirstFrame = 0;
+	audio->captureDiagReceivedFirstUs = 0;
+	audio->captureDiagOutputFirstUs = 0;
 
 	/* Open async capture system (Main Output) */
 	audio->captureFile = fopen("faudio_capture.raw", "wb");
@@ -3165,9 +3184,64 @@ uint32_t FAudioSourceVoice_SubmitSourceBuffer(
 	/* Record received buffer to received capture (PCM 32F ONLY) */
 	if (voice->audio->captureReceivedActive && voice->src.format->wBitsPerSample == 32)
 	{
+		FAudio *audio = voice->audio;
+		uint32_t channels = voice->src.format->nChannels;
+		uint32_t sampleRate = voice->src.format->nSamplesPerSec;
 		uint32_t samplesCount = pBuffer->AudioBytes / sizeof(float);
+		uint32_t framesCount;
 		uint32_t writeIdx, readIdx, availableSpace;
 		float *buf = voice->audio->captureReceivedBuffer;
+		const float *incoming = (const float*) pBuffer->pAudioData;
+
+		if (channels == 0) {
+			channels = 1;
+		}
+		framesCount = samplesCount / channels;
+
+		if (!audio->captureDiagReceivedFirstSeen && incoming != NULL && samplesCount > 0) {
+			uint32_t i;
+			for (i = 0; i < samplesCount; i += 1) {
+				if (incoming[i] != 0.0f) {
+					audio->captureDiagReceivedFirstSeen = 1;
+					audio->captureDiagReceivedChannels = channels;
+					audio->captureDiagReceivedSampleRate = sampleRate;
+					audio->captureDiagReceivedFirstFrame = audio->captureDiagReceivedFramesTotal + (i / channels);
+					audio->captureDiagReceivedFirstUs = FAudio_INTERNAL_GetMicroseconds();
+					LOG_INFO(
+						audio,
+						"CAPTURE-DIAG: first_nonzero_received us=%llu frame=%llu sr=%u ch=%u",
+						(unsigned long long) audio->captureDiagReceivedFirstUs,
+						(unsigned long long) audio->captureDiagReceivedFirstFrame,
+						audio->captureDiagReceivedSampleRate,
+						audio->captureDiagReceivedChannels
+					);
+					break;
+				}
+			}
+		}
+
+		audio->captureDiagReceivedFramesTotal += framesCount;
+
+		if (
+			audio->captureDiagReceivedFirstSeen &&
+			audio->captureDiagOutputFirstSeen &&
+			!audio->captureDiagDeltaLogged
+		) {
+			int64_t deltaUs = (int64_t) audio->captureDiagOutputFirstUs - (int64_t) audio->captureDiagReceivedFirstUs;
+			int64_t deltaFrames48k = (deltaUs >= 0) ?
+				(int64_t) ((deltaUs * 48000 + 500000) / 1000000) :
+				-(int64_t) (((-deltaUs) * 48000 + 500000) / 1000000);
+			audio->captureDiagDeltaLogged = 1;
+			LOG_INFO(
+				audio,
+				"CAPTURE-DIAG: first_nonzero_delta capture-received us=%lld ms=%.3f frames@48k=%lld (recv_frame=%llu cap_frame=%llu)",
+				(long long) deltaUs,
+				(double) deltaUs / 1000.0,
+				(long long) deltaFrames48k,
+				(unsigned long long) audio->captureDiagReceivedFirstFrame,
+				(unsigned long long) audio->captureDiagOutputFirstFrame
+			);
+		}
 		
 		FAudio_PlatformLockMutex(voice->audio->captureReceivedLock);
 		writeIdx = voice->audio->captureReceivedWriteIdx;

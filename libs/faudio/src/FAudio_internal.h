@@ -523,6 +523,7 @@ struct FAudio
 	/* Window function and constants */
 	float *wsolaHannWindow;                    /* Hann window for WSOLA (20ms) */
 	uint32_t wsolaWindowSize;                  /* 1920 samples @ 48kHz stereo (20ms) */
+	uint8_t wsolaDisabled;                     /* Runtime toggle: bypass WSOLA processing */
 
 	/* Audio Capture for Debugging (PCM 32F interleaved) */
 	void* captureFile;
@@ -539,6 +540,21 @@ struct FAudio
 	FAudioThread captureReceivedThread;
 	uint8_t captureActive;
 	uint8_t captureReceivedActive;
+
+	/* Capture diagnostic: first non-zero timing correlation (received vs capture) */
+	uint8_t captureDiagReceivedFirstSeen;
+	uint8_t captureDiagOutputFirstSeen;
+	uint8_t captureDiagDeltaLogged;
+	uint32_t captureDiagReceivedSampleRate;
+	uint32_t captureDiagOutputSampleRate;
+	uint32_t captureDiagReceivedChannels;
+	uint32_t captureDiagOutputChannels;
+	uint64_t captureDiagReceivedFramesTotal;
+	uint64_t captureDiagOutputFramesTotal;
+	uint64_t captureDiagReceivedFirstFrame;
+	uint64_t captureDiagOutputFirstFrame;
+	uint64_t captureDiagReceivedFirstUs;
+	uint64_t captureDiagOutputFirstUs;
 };
 
 struct FAudioVoice
