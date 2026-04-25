@@ -560,12 +560,112 @@ static int32_t FAUDIOCALL FAudio_INTERNAL_CaptureReceivedThreadFunc(void* data)
 	return 0;
 }
 
+static uint32_t FAudio_INTERNAL_ReadEnvUInt(
+	const char *name,
+	uint32_t defaultValue,
+	uint32_t minValue,
+	uint32_t maxValue
+) {
+	const char *env = FAudio_getenv(name);
+	char *endPtr;
+	long parsed;
+
+	if (env == NULL || *env == '\0') {
+		return defaultValue;
+	}
+
+	parsed = strtol(env, &endPtr, 10);
+	if (endPtr == env) {
+		return defaultValue;
+	}
+	if (parsed < (long) minValue) {
+		return minValue;
+	}
+	if (parsed > (long) maxValue) {
+		return maxValue;
+	}
+	return (uint32_t) parsed;
+}
+
+static float FAudio_INTERNAL_ReadEnvFloat(
+	const char *name,
+	float defaultValue,
+	float minValue,
+	float maxValue
+) {
+	const char *env = FAudio_getenv(name);
+	char *endPtr;
+	double parsed;
+
+	if (env == NULL || *env == '\0') {
+		return defaultValue;
+	}
+
+	parsed = strtod(env, &endPtr);
+	if (endPtr == env) {
+		return defaultValue;
+	}
+	if (parsed < (double) minValue) {
+		return minValue;
+	}
+	if (parsed > (double) maxValue) {
+		return maxValue;
+	}
+	return (float) parsed;
+}
+
+static uint8_t FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(
+	const char *a,
+	const char *b
+) {
+	char ca;
+	char cb;
+
+	if (a == NULL || b == NULL) {
+		return 0;
+	}
+
+	while (*a != '\0' && *b != '\0') {
+		ca = *a;
+		cb = *b;
+		if (ca >= 'A' && ca <= 'Z') {
+			ca = (char) (ca - 'A' + 'a');
+		}
+		if (cb >= 'A' && cb <= 'Z') {
+			cb = (char) (cb - 'A' + 'a');
+		}
+		if (ca != cb) {
+			return 0;
+		}
+		a += 1;
+		b += 1;
+	}
+
+	return (*a == '\0' && *b == '\0') ? 1 : 0;
+}
+
 uint32_t FAudio_Initialize(
 	FAudio *audio,
 	uint32_t Flags,
 	FAudioProcessor XAudio2Processor
 ) {
 	const char *env;
+	const char *wsolaPresetEnv;
+	const char *wsolaPresetName;
+	uint32_t wsolaHistoryMs;
+	uint32_t wsolaWindowMs;
+	uint32_t wsolaSearchBaseWin;
+	uint32_t wsolaSearchEscalateWin;
+	uint32_t wsolaSearchCandidates;
+	float wsolaAltCorrTol;
+	uint32_t wsolaMaxPureSilenceMs;
+	uint32_t wsolaResumeConfirmMs;
+	uint32_t wsolaInterpMs;
+	uint32_t wsolaShortWindowMs;
+	float wsolaEnterXfadeMinMs;
+	float wsolaEnterXfadeMaxMs;
+	float wsolaReleaseShortXfadeMaxMs;
+	float wsolaReleaseLongXfadeMaxMs;
 	LOG_API_ENTER(audio)
 	FAudio_assert(Flags == 0 || Flags == FAUDIO_DEBUG_ENGINE);
 	FAudio_assert(XAudio2Processor == FAUDIO_DEFAULT_PROCESSOR);
@@ -582,15 +682,123 @@ uint32_t FAudio_Initialize(
 	LOG_INFO(audio, "INIT_FLAGS=%u", Flags)
 	LOG_INFO(audio, "PROCESSOR=%u", XAudio2Processor)
 
+	/*
+	 * Preset baseline; each fine-grained env var can still override these values.
+	 * Supported presets: default|par_defaut, stable, equilibre|balanced, agressif|aggressive
+	 */
+	wsolaPresetName = "default";
+	wsolaHistoryMs = 200;
+	wsolaWindowMs = 20;
+	wsolaSearchBaseWin = 8;
+	wsolaSearchEscalateWin = 30;
+	wsolaSearchCandidates = 16;
+	wsolaAltCorrTol = 0.08f;
+	wsolaMaxPureSilenceMs = 100;
+	wsolaResumeConfirmMs = 40;
+	wsolaInterpMs = 3;
+	wsolaShortWindowMs = 10;
+	wsolaEnterXfadeMinMs = 1.0f;
+	wsolaEnterXfadeMaxMs = 4.0f;
+	wsolaReleaseShortXfadeMaxMs = 4.0f;
+	wsolaReleaseLongXfadeMaxMs = 10.0f;
+
+	wsolaPresetEnv = FAudio_getenv("FAUDIO_WSOLA_PRESET");
+	if (wsolaPresetEnv != NULL && *wsolaPresetEnv != '\0') {
+		if (FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "stable")) {
+			wsolaPresetName = "stable";
+			wsolaHistoryMs = 260;
+			wsolaWindowMs = 24;
+			wsolaSearchBaseWin = 12;
+			wsolaSearchEscalateWin = 48;
+			wsolaSearchCandidates = 24;
+			wsolaAltCorrTol = 0.04f;
+			wsolaMaxPureSilenceMs = 120;
+			wsolaResumeConfirmMs = 60;
+			wsolaInterpMs = 2;
+			wsolaShortWindowMs = 8;
+			wsolaEnterXfadeMinMs = 1.0f;
+			wsolaEnterXfadeMaxMs = 3.0f;
+			wsolaReleaseShortXfadeMaxMs = 3.0f;
+			wsolaReleaseLongXfadeMaxMs = 8.0f;
+		} else if (
+			FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "equilibre") ||
+			FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "balanced")
+		) {
+			wsolaPresetName = "equilibre";
+			wsolaHistoryMs = 220;
+			wsolaWindowMs = 20;
+			wsolaSearchBaseWin = 10;
+			wsolaSearchEscalateWin = 36;
+			wsolaSearchCandidates = 20;
+			wsolaAltCorrTol = 0.06f;
+			wsolaMaxPureSilenceMs = 100;
+			wsolaResumeConfirmMs = 45;
+			wsolaInterpMs = 2;
+			wsolaShortWindowMs = 8;
+			wsolaEnterXfadeMinMs = 1.0f;
+			wsolaEnterXfadeMaxMs = 3.5f;
+			wsolaReleaseShortXfadeMaxMs = 3.5f;
+			wsolaReleaseLongXfadeMaxMs = 8.0f;
+		} else if (
+			FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "agressif") ||
+			FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "aggressive")
+		) {
+			wsolaPresetName = "agressif";
+			wsolaHistoryMs = 140;
+			wsolaWindowMs = 15;
+			wsolaSearchBaseWin = 6;
+			wsolaSearchEscalateWin = 18;
+			wsolaSearchCandidates = 12;
+			wsolaAltCorrTol = 0.12f;
+			wsolaMaxPureSilenceMs = 70;
+			wsolaResumeConfirmMs = 20;
+			wsolaInterpMs = 4;
+			wsolaShortWindowMs = 12;
+			wsolaEnterXfadeMinMs = 1.0f;
+			wsolaEnterXfadeMaxMs = 5.0f;
+			wsolaReleaseShortXfadeMaxMs = 5.0f;
+			wsolaReleaseLongXfadeMaxMs = 12.0f;
+		} else if (
+			FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "default") ||
+			FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "par_defaut") ||
+			FAudio_INTERNAL_StrEqualsIgnoreCaseAscii(wsolaPresetEnv, "par-defaut")
+		) {
+			wsolaPresetName = "default";
+		} else {
+			LOG_INFO(audio, "WSOLA: unknown preset '%s', using default", wsolaPresetEnv)
+		}
+	}
+
+	wsolaHistoryMs = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_HISTORY_MS", wsolaHistoryMs, 40, 1000);
+	wsolaWindowMs = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_WINDOW_MS", wsolaWindowMs, 5, 80);
+	if (wsolaHistoryMs < (wsolaWindowMs * 2)) {
+		wsolaHistoryMs = wsolaWindowMs * 2;
+	}
+	audio->wsolaSearchBaseWindows = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_SEARCH_BASE_WIN", wsolaSearchBaseWin, 1, 128);
+	audio->wsolaSearchEscalatedWindows = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_SEARCH_ESCALATE_WIN", wsolaSearchEscalateWin, 1, 256);
+	audio->wsolaSearchMaxCandidates = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_SEARCH_MAX_CANDIDATES", wsolaSearchCandidates, 4, 64);
+	audio->wsolaAltCorrTolerance = FAudio_INTERNAL_ReadEnvFloat("FAUDIO_WSOLA_ALT_CORR_TOL", wsolaAltCorrTol, 0.0f, 0.5f);
+	audio->wsolaMaxPureSilenceMs = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_MAX_PURE_SILENCE_MS", wsolaMaxPureSilenceMs, 20, 1000);
+	audio->wsolaResumeConfirmMs = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_RESUME_CONFIRM_MS", wsolaResumeConfirmMs, 5, 250);
+	audio->wsolaInterpMs = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_INTERP_MS", wsolaInterpMs, 1, 20);
+	audio->wsolaShortWindowMs = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_SHORT_WINDOW_MS", wsolaShortWindowMs, 2, 40);
+	audio->wsolaEnterXfadeMinMs = FAudio_INTERNAL_ReadEnvFloat("FAUDIO_WSOLA_ENTER_XFADE_MIN_MS", wsolaEnterXfadeMinMs, 0.1f, 10.0f);
+	audio->wsolaEnterXfadeMaxMs = FAudio_INTERNAL_ReadEnvFloat("FAUDIO_WSOLA_ENTER_XFADE_MAX_MS", wsolaEnterXfadeMaxMs, 0.2f, 30.0f);
+	if (audio->wsolaEnterXfadeMaxMs < audio->wsolaEnterXfadeMinMs) {
+		audio->wsolaEnterXfadeMaxMs = audio->wsolaEnterXfadeMinMs;
+	}
+	audio->wsolaReleaseShortXfadeMaxMs = FAudio_INTERNAL_ReadEnvFloat("FAUDIO_WSOLA_RELEASE_SHORT_XFADE_MAX_MS", wsolaReleaseShortXfadeMaxMs, 0.2f, 30.0f);
+	audio->wsolaReleaseLongXfadeMaxMs = FAudio_INTERNAL_ReadEnvFloat("FAUDIO_WSOLA_RELEASE_LONG_XFADE_MAX_MS", wsolaReleaseLongXfadeMaxMs, 0.5f, 60.0f);
+
 	/* WSOLA: Initialize buffers for Waveform Similarity-Based Overlap-Add */
-	/* History buffer: 200ms @ 48kHz stereo = 19200 samples */
-	audio->historyMax = (48000 * 200 / 1000) * 2;
+	/* History buffer: configurable ms @ 48kHz stereo */
+	audio->historyMax = (48000 * wsolaHistoryMs / 1000) * 2;
 	audio->historyBuffer = (float*)audio->pMalloc(audio->historyMax * sizeof(float));
 	FAudio_zero(audio->historyBuffer, audio->historyMax * sizeof(float));
 	audio->historyWriteIdx = 0;
 	
-	/* WSOLA window size: 20ms = 1920 samples @ 48kHz stereo */
-	audio->wsolaWindowSize = (48000 * 20 / 1000) * 2;
+	/* WSOLA window size: configurable ms @ 48kHz stereo */
+	audio->wsolaWindowSize = (48000 * wsolaWindowMs / 1000) * 2;
 	
 	/* Double-buffer for last valid segment */
 	audio->wsolaLastValidSegment_Active = (float*)audio->pMalloc(audio->wsolaWindowSize * sizeof(float));
@@ -642,6 +850,29 @@ uint32_t FAudio_Initialize(
 	if (audio->wsolaDisabled) {
 		LOG_INFO(audio, "%s", "WSOLA: disabled via FAUDIO_WSOLA_DISABLE=1")
 	}
+	LOG_INFO(audio, "WSOLA: preset=%s", wsolaPresetName)
+	LOG_INFO(
+		audio,
+		"WSOLA-CONFIG: history_ms=%u window_ms=%u search_base_win=%u search_escalate_win=%u candidates=%u alt_tol=%.3f",
+		wsolaHistoryMs,
+		wsolaWindowMs,
+		audio->wsolaSearchBaseWindows,
+		audio->wsolaSearchEscalatedWindows,
+		audio->wsolaSearchMaxCandidates,
+		audio->wsolaAltCorrTolerance
+	)
+	LOG_INFO(
+		audio,
+		"WSOLA-CONFIG: max_silence_ms=%u resume_ms=%u interp_ms=%u short_ms=%u xfade_enter=[%.2f..%.2f] xfade_release_max=[short %.2f / long %.2f]",
+		audio->wsolaMaxPureSilenceMs,
+		audio->wsolaResumeConfirmMs,
+		audio->wsolaInterpMs,
+		audio->wsolaShortWindowMs,
+		audio->wsolaEnterXfadeMinMs,
+		audio->wsolaEnterXfadeMaxMs,
+		audio->wsolaReleaseShortXfadeMaxMs,
+		audio->wsolaReleaseLongXfadeMaxMs
+	)
 	audio->captureDiagReceivedFirstSeen = 0;
 	audio->captureDiagOutputFirstSeen = 0;
 	audio->captureDiagDeltaLogged = 0;

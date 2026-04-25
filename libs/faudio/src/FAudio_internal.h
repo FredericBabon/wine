@@ -480,15 +480,15 @@ struct FAudio
 	void *platform;
 
 	/* Audio Replacement / WSOLA (Waveform Similarity-Based Overlap-Add) */
-	float *historyBuffer;                      /* 100ms history @ 48kHz stereo = 9600 samples */
+	float *historyBuffer;                      /* Configurable history buffer (default 200ms @ 48kHz stereo) */
 	uint32_t historyMax;                       /* Capacity of history buffer */
 	uint32_t historyWriteIdx;                  /* Write pointer (advances with valid audio) */
 	
-	/* Double-buffer for last valid segment (20ms window = 1920 samples stereo) */
+	/* Double-buffer for last valid segment (configurable window, default 20ms) */
 	float *wsolaLastValidSegment_Active;       /* Currently being filled with valid audio */
-	float *wsolaLastValidSegment_Snapshot;     /* Snapshot (guaranteed complete 20ms) for pattern matching */
-	uint32_t wsolaSegmentIdx;                  /* Index in Active buffer (0-1920) */
-	uint32_t wsolaSegmentCountdownMs;          /* Milliseconds accumulated (0-20) */
+	float *wsolaLastValidSegment_Snapshot;     /* Snapshot (guaranteed complete window) for pattern matching */
+	uint32_t wsolaSegmentIdx;                  /* Index in Active buffer (0-windowSize) */
+	uint32_t wsolaSegmentCountdownMs;          /* Legacy counter kept for diagnostics */
 	
 	/* Silence detection and synthesis */
 	uint32_t wsolaSilenceDurationSamples;      /* Counts silence until 1920 samples (20ms) */
@@ -521,9 +521,21 @@ struct FAudio
 	uint32_t wsolaEnteringCrossfadeStartPos;   /* History cursor for entering crossfade */
 	
 	/* Window function and constants */
-	float *wsolaHannWindow;                    /* Hann window for WSOLA (20ms) */
-	uint32_t wsolaWindowSize;                  /* 1920 samples @ 48kHz stereo (20ms) */
+	float *wsolaHannWindow;                    /* Hann window for WSOLA (configurable) */
+	uint32_t wsolaWindowSize;                  /* Samples per WSOLA window (default 20ms @ 48kHz stereo) */
 	uint8_t wsolaDisabled;                     /* Runtime toggle: bypass WSOLA processing */
+	uint32_t wsolaSearchBaseWindows;           /* Base search range in window units */
+	uint32_t wsolaSearchEscalatedWindows;      /* Escalated search range in window units */
+	uint32_t wsolaSearchMaxCandidates;         /* Max candidates evaluated per selection */
+	float wsolaAltCorrTolerance;               /* Accept alternate offset when corr drop <= tolerance */
+	uint32_t wsolaMaxPureSilenceMs;            /* Pure silence timeout before intentional silence mode */
+	uint32_t wsolaResumeConfirmMs;             /* Stable valid run required before leaving concealment */
+	uint32_t wsolaInterpMs;                    /* Hybrid interpolation branch duration */
+	uint32_t wsolaShortWindowMs;               /* Hybrid short-WSOLA window duration */
+	float wsolaEnterXfadeMinMs;                /* Entering crossfade minimum duration */
+	float wsolaEnterXfadeMaxMs;                /* Entering crossfade maximum duration */
+	float wsolaReleaseShortXfadeMaxMs;         /* Release crossfade max duration for short-hole branch */
+	float wsolaReleaseLongXfadeMaxMs;          /* Release crossfade max duration for long synthesis */
 
 	/* Audio Capture for Debugging (PCM 32F interleaved) */
 	void* captureFile;
