@@ -2117,6 +2117,9 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
 						audio->wsolaBestOffset = bestOffset;
 						audio->wsolaSynthesisIdx = 0;
+						audio->wsolaBoundaryOlaActive = 0;
+						audio->wsolaBoundaryOlaFrameIdx = 0;
+						audio->wsolaBoundaryOlaFrames = 0;
 						audio->wsolaInCrossfade = 0;
 						audio->wsolaCrossfadeIdx = 0;
 						audio->wsolaCrossfadeTargetSamples = 0;
@@ -2368,6 +2371,9 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 							audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
 							audio->wsolaBestOffset = bestOffset;
 							audio->wsolaSynthesisIdx = 0;
+							audio->wsolaBoundaryOlaActive = 0;
+							audio->wsolaBoundaryOlaFrameIdx = 0;
+							audio->wsolaBoundaryOlaFrames = 0;
 							audio->wsolaInCrossfade = 0;
 							audio->wsolaCrossfadeIdx = 0;
 							audio->wsolaCrossfadeTargetSamples = 0;
@@ -2445,6 +2451,9 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaSilenceDurationSamples = 0;
 					audio->wsolaValidRunSamples = 0;
 					audio->wsolaSynthesisIdx = 0;
+					audio->wsolaBoundaryOlaActive = 0;
+					audio->wsolaBoundaryOlaFrameIdx = 0;
+					audio->wsolaBoundaryOlaFrames = 0;
 					audio->wsolaInCrossfade = 0;
 					audio->wsolaCrossfadeIdx = 0;
 					audio->wsolaCrossfadeTargetSamples = 0;
@@ -2463,6 +2472,25 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 				) % audio->historyMax;
 				float histSample = audio->historyBuffer[(readPos + channelIdx) % audio->historyMax];
 				float windowVal;
+				if (!audio->wsolaDisableBoundaryOla && audio->wsolaBoundaryOlaActive && audio->wsolaBoundaryOlaFrames > 0) {
+					uint32_t frameIdx = audio->wsolaBoundaryOlaFrameIdx;
+					uint32_t prevReadPos = (
+						audio->wsolaPrevSynthesisStartPos +
+						audio->historyMax -
+						(audio->wsolaPrevBestOffset % audio->historyMax) +
+						audio->wsolaWindowSize +
+						(frameIdx * channels)
+					) % audio->historyMax;
+					float prevSample = audio->historyBuffer[(prevReadPos + channelIdx) % audio->historyMax];
+					float fade = (float) frameIdx / (float) audio->wsolaBoundaryOlaFrames;
+					histSample = (prevSample * (1.0f - fade)) + (histSample * fade);
+					if (channelIdx == channels - 1) {
+						audio->wsolaBoundaryOlaFrameIdx += 1;
+						if (audio->wsolaBoundaryOlaFrameIdx >= audio->wsolaBoundaryOlaFrames) {
+							audio->wsolaBoundaryOlaActive = 0;
+						}
+					}
+				}
 				
 				/*
 				 * Keep long-gap synthesis level-stable.
@@ -2523,6 +2551,9 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaState = 0;
 						audio->wsolaSegmentIdx = 0;
 						audio->wsolaSegmentCountdownMs = 0;
+						audio->wsolaBoundaryOlaActive = 0;
+						audio->wsolaBoundaryOlaFrameIdx = 0;
+						audio->wsolaBoundaryOlaFrames = 0;
 						audio->wsolaInCrossfade = 0;
 						audio->wsolaCrossfadeTargetSamples = 0;
 						LOG_INFO(audio, "%s", "WSOLA: Crossfade complete, returning to State 0");
@@ -2553,6 +2584,8 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 							 * back to State 1 every 20ms, which creates audible
 							 * repeating 40ms motifs.
 							 */
+							audio->wsolaPrevSynthesisStartPos = audio->wsolaSynthesisStartPos;
+							audio->wsolaPrevBestOffset = audio->wsolaBestOffset;
 							audio->wsolaSynthesisStartPos = (
 								audio->wsolaSynthesisStartPos + audio->wsolaWindowSize
 							) % audio->historyMax;
@@ -2561,6 +2594,15 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 								audio->wsolaLastValidSegment_Snapshot,
 								audio->wsolaWindowSize
 							);
+							if (!audio->wsolaDisableBoundaryOla) {
+								audio->wsolaBoundaryOlaFrames = FAudio_max(1, (audio->wsolaWindowSize / (2 * channels)));
+								audio->wsolaBoundaryOlaFrameIdx = 0;
+								audio->wsolaBoundaryOlaActive = 1;
+							} else {
+								audio->wsolaBoundaryOlaFrames = 0;
+								audio->wsolaBoundaryOlaFrameIdx = 0;
+								audio->wsolaBoundaryOlaActive = 0;
+							}
 							audio->wsolaSynthesisIdx = 0;
 							LOG_INFO(
 								audio,

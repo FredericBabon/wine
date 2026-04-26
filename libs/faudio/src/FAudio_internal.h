@@ -504,6 +504,11 @@ struct FAudio
 	uint32_t wsolaSynthesisIdx;                /* Current position in synthesis window (0-1920) */
 	uint32_t wsolaSynthesisStartPos;           /* Snapshot of historyWriteIdx when synthesis started */
 	uint32_t wsolaBestOffset;                  /* Best match offset in history (found via correlation) */
+	uint32_t wsolaPrevSynthesisStartPos;       /* Previous synthesis base for boundary overlap */
+	uint32_t wsolaPrevBestOffset;              /* Previous offset for boundary overlap */
+	uint32_t wsolaBoundaryOlaFrameIdx;         /* Frame index inside boundary overlap region */
+	uint32_t wsolaBoundaryOlaFrames;           /* Boundary overlap length in frames */
+	uint8_t wsolaBoundaryOlaActive;            /* Flag: blend previous/new trajectory at re-anchor */
 	uint32_t wsolaLastOffset1;                 /* Last selected offset (for anti-repetition) */
 	uint32_t wsolaLastOffset2;                 /* Previous offset before last (for anti-repetition) */
 	uint32_t wsolaOffsetRepeatCount;           /* Repeated/near-identical offset streak length */
@@ -525,6 +530,7 @@ struct FAudio
 	uint32_t wsolaWindowSize;                  /* Samples per WSOLA window (default 20ms @ 48kHz stereo) */
 	uint8_t wsolaDisabled;                     /* Runtime toggle: bypass WSOLA processing */
 	uint8_t wsolaDisableShort;                 /* Runtime toggle: bypass short-WSOLA branch in State 1 */
+	uint8_t wsolaDisableBoundaryOla;           /* Runtime toggle: bypass boundary OLA at State 2 re-anchor */
 	uint32_t wsolaSearchBaseWindows;           /* Base search range in window units */
 	uint32_t wsolaSearchEscalatedWindows;      /* Escalated search range in window units */
 	uint32_t wsolaSearchMaxCandidates;         /* Max candidates evaluated per selection */
