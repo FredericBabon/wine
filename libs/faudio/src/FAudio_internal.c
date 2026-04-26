@@ -2060,9 +2060,8 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 
 					/*
 					 * Hybrid concealment for short holes:
-					 *  - < 3ms: simple interpolation from last valid sample
-					 *  - 3ms..20ms: short WSOLA/mini-OLA using history-only overlap
-					 *  - >= 20ms: existing long WSOLA path below
+					 *  - < interp_ms: simple interpolation from last valid sample
+					 *  - >= interp_ms: short WSOLA (unless disabled), then long WSOLA path
 					 */
 					uint32_t interpSamples = FAudio_INTERNAL_WsolaMsToSamples(
 						audio,
@@ -2103,6 +2102,30 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 							output[sampleIdx],
 							channelIdx,
 							channels
+						);
+					} else if (audio->wsolaDisableShort) {
+						/*
+						 * Optional mode: skip short-WSOLA and jump directly to long synthesis
+						 * once interpolation is done.
+						 */
+						uint32_t bestOffset = FAudio_INTERNAL_FindBestSegment(
+							audio,
+							audio->wsolaLastValidSegment_Snapshot,
+							audio->wsolaWindowSize
+						);
+
+						audio->wsolaSynthesisStartPos = audio->historyWriteIdx;
+						audio->wsolaBestOffset = bestOffset;
+						audio->wsolaSynthesisIdx = 0;
+						audio->wsolaInCrossfade = 0;
+						audio->wsolaCrossfadeIdx = 0;
+						audio->wsolaCrossfadeTargetSamples = 0;
+						audio->wsolaState = 2;
+
+						LOG_INFO(
+							audio,
+							"WSOLA: Short branch disabled, entering State 2 after interpolation (offset=%u)",
+							bestOffset
 						);
 					} else {
 						uint32_t shortPosInWindow;
@@ -2183,8 +2206,8 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaSilenceDurationSamples += 1;
 					audio->wsolaConcealmentDurationSamples += 1;
 					
-					/* When 20ms of silence accumulated, start synthesis */
-					if (audio->wsolaSilenceDurationSamples >= audio->wsolaWindowSize) {
+					/* When one full WSOLA window of silence accumulated, start synthesis */
+					if (audio->wsolaState == 1 && audio->wsolaSilenceDurationSamples >= audio->wsolaWindowSize) {
 						/* Find best matching segment in history */
 						uint32_t bestOffset = FAudio_INTERNAL_FindBestSegment(
 							audio,
@@ -2249,6 +2272,16 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 								float lastValidSample = audio->historyBuffer[lastValidPos];
 								float interpSample = audio->historyBuffer[(interpReadPos + channelIdx) % audio->historyMax];
 								audio->wsolaCurrentSynthSample[channelIdx] = (lastValidSample * (1.0f - interpFactor)) + (interpSample * interpFactor);
+							} else if (audio->wsolaDisableShort) {
+								/* Keep interpolation endpoint while short branch is disabled. */
+								uint32_t interpReadPos = (
+									audio->historyWriteIdx +
+									audio->historyMax -
+									(interpSamples % audio->historyMax) +
+									((interpSamples > 0) ? (interpSamples - 1) : 0)
+								) % audio->historyMax;
+								audio->wsolaCurrentSynthSample[channelIdx] =
+									audio->historyBuffer[(interpReadPos + channelIdx) % audio->historyMax];
 							} else {
 								uint32_t shortPosInWindow;
 								uint32_t readPos;

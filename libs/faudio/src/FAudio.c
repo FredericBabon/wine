@@ -847,8 +847,13 @@ uint32_t FAudio_Initialize(
 	audio->wsolaIntentionalSilence = 0;
 	env = FAudio_getenv("FAUDIO_WSOLA_DISABLE");
 	audio->wsolaDisabled = (env != NULL && *env == '1') ? 1 : 0;
+	env = FAudio_getenv("FAUDIO_WSOLA_DISABLE_SHORT");
+	audio->wsolaDisableShort = (env != NULL && *env == '1') ? 1 : 0;
 	if (audio->wsolaDisabled) {
 		LOG_INFO(audio, "%s", "WSOLA: disabled via FAUDIO_WSOLA_DISABLE=1")
+	}
+	if (audio->wsolaDisableShort) {
+		LOG_INFO(audio, "%s", "WSOLA: short branch disabled via FAUDIO_WSOLA_DISABLE_SHORT=1")
 	}
 	LOG_INFO(audio, "WSOLA: preset=%s", wsolaPresetName)
 	LOG_INFO(
@@ -863,11 +868,12 @@ uint32_t FAudio_Initialize(
 	)
 	LOG_INFO(
 		audio,
-		"WSOLA-CONFIG: max_silence_ms=%u resume_ms=%u interp_ms=%u short_ms=%u xfade_enter=[%.2f..%.2f] xfade_release_max=[short %.2f / long %.2f]",
+		"WSOLA-CONFIG: max_silence_ms=%u resume_ms=%u interp_ms=%u short_ms=%u short_disabled=%u xfade_enter=[%.2f..%.2f] xfade_release_max=[short %.2f / long %.2f]",
 		audio->wsolaMaxPureSilenceMs,
 		audio->wsolaResumeConfirmMs,
 		audio->wsolaInterpMs,
 		audio->wsolaShortWindowMs,
+		audio->wsolaDisableShort,
 		audio->wsolaEnterXfadeMinMs,
 		audio->wsolaEnterXfadeMaxMs,
 		audio->wsolaReleaseShortXfadeMaxMs,

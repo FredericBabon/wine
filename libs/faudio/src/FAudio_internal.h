@@ -524,6 +524,7 @@ struct FAudio
 	float *wsolaHannWindow;                    /* Hann window for WSOLA (configurable) */
 	uint32_t wsolaWindowSize;                  /* Samples per WSOLA window (default 20ms @ 48kHz stereo) */
 	uint8_t wsolaDisabled;                     /* Runtime toggle: bypass WSOLA processing */
+	uint8_t wsolaDisableShort;                 /* Runtime toggle: bypass short-WSOLA branch in State 1 */
 	uint32_t wsolaSearchBaseWindows;           /* Base search range in window units */
 	uint32_t wsolaSearchEscalatedWindows;      /* Escalated search range in window units */
 	uint32_t wsolaSearchMaxCandidates;         /* Max candidates evaluated per selection */
