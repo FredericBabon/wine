@@ -509,6 +509,12 @@ struct FAudio
 	uint32_t wsolaBoundaryOlaFrameIdx;         /* Frame index inside boundary overlap region */
 	uint32_t wsolaBoundaryOlaFrames;           /* Boundary overlap length in frames */
 	uint8_t wsolaBoundaryOlaActive;            /* Flag: blend previous/new trajectory at re-anchor */
+
+	/* Grain engine (Step B): canonical hop=Hs=N/2 OLA synthesis for State 2 */
+	float *wsolaGrainBuffer;                   /* OLA accumulator buffer (wsolaWindowSize samples) */
+	uint32_t wsolaGrainFramePos;               /* Current read-frame position in grain buffer (0..Hs_frames-1) */
+	uint8_t wsolaGrainEngineReady;             /* Grain engine initialized for current concealment period */
+	uint8_t wsolaDisableGrainEngine;           /* Runtime toggle: bypass grain engine, use legacy state 2 */
 	uint32_t wsolaLastOffset1;                 /* Last selected offset (for anti-repetition) */
 	uint32_t wsolaLastOffset2;                 /* Previous offset before last (for anti-repetition) */
 	uint32_t wsolaOffsetRepeatCount;           /* Repeated/near-identical offset streak length */

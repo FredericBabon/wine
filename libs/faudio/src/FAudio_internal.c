@@ -2123,6 +2123,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaInCrossfade = 0;
 						audio->wsolaCrossfadeIdx = 0;
 						audio->wsolaCrossfadeTargetSamples = 0;
+						audio->wsolaGrainEngineReady = 0;
 						audio->wsolaState = 2;
 
 						LOG_INFO(
@@ -2225,6 +2226,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaInCrossfade = 0;
 						audio->wsolaCrossfadeIdx = 0;
 						audio->wsolaCrossfadeTargetSamples = 0;
+						audio->wsolaGrainEngineReady = 0;
 						audio->wsolaState = 2;
 						
 						LOG_INFO(
@@ -2378,6 +2380,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 							audio->wsolaCrossfadeIdx = 0;
 							audio->wsolaCrossfadeTargetSamples = 0;
 							audio->wsolaValidRunSamples = 0;
+							audio->wsolaGrainEngineReady = 0;
 							audio->wsolaState = 2;
 
 							LOG_INFO(
@@ -2457,47 +2460,119 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					audio->wsolaInCrossfade = 0;
 					audio->wsolaCrossfadeIdx = 0;
 					audio->wsolaCrossfadeTargetSamples = 0;
+					audio->wsolaGrainEngineReady = 0;
 					audio->wsolaCurrentSynthSample[channelIdx] = 0.0f;
 					output[sampleIdx] = 0.0f;
 					LOG_INFO(audio, "WSOLA: Pure silence exceeded %ums during long synthesis, switching to intentional silence", audio->wsolaMaxPureSilenceMs);
 					continue;
 				}
 				
-				/* Calculate fixed read position from history */
-				uint32_t readPos = (
-					audio->wsolaSynthesisStartPos +
-					audio->historyMax -
-					(audio->wsolaBestOffset % audio->historyMax) +
-					audio->wsolaSynthesisIdx
-				) % audio->historyMax;
-				float histSample = audio->historyBuffer[(readPos + channelIdx) % audio->historyMax];
-				float windowVal;
-				if (!audio->wsolaDisableBoundaryOla && audio->wsolaBoundaryOlaActive && audio->wsolaBoundaryOlaFrames > 0) {
-					uint32_t frameIdx = audio->wsolaBoundaryOlaFrameIdx;
-					uint32_t prevReadPos = (
-						audio->wsolaPrevSynthesisStartPos +
+				/* Sample generation: grain engine (Step B) or legacy trajectory (Step A/legacy) */
+				float histSample;
+				if (!audio->wsolaDisableGrainEngine) {
+					/* GRAIN ENGINE: canonical hop=Hs=N/2 OLA synthesis */
+					uint32_t Hs = audio->wsolaWindowSize / 2;
+					uint32_t Hs_frames = (channels > 0) ? (Hs / channels) : Hs;
+					if (Hs_frames < 1) Hs_frames = 1;
+
+					/* Initialize grain engine on first frame of concealment */
+					if (!audio->wsolaGrainEngineReady && channelIdx == 0) {
+						uint32_t i;
+						uint32_t bestOffset;
+						FAudio_zero(audio->wsolaGrainBuffer, audio->wsolaWindowSize * sizeof(float));
+						bestOffset = FAudio_INTERNAL_FindBestSegment(
+							audio,
+							audio->wsolaLastValidSegment_Snapshot,
+							audio->wsolaWindowSize
+						);
+						audio->wsolaBestOffset = bestOffset;
+						for (i = 0; i < audio->wsolaWindowSize; i++) {
+							uint32_t hPos = (
+								audio->historyWriteIdx +
+								audio->historyMax -
+								(bestOffset % audio->historyMax) +
+								i
+							) % audio->historyMax;
+							audio->wsolaGrainBuffer[i] += audio->historyBuffer[hPos] * audio->wsolaHannWindow[i];
+						}
+						audio->wsolaGrainFramePos = 0;
+						audio->wsolaGrainEngineReady = 1;
+						LOG_INFO(audio, "WSOLA-GRAIN: Engine initialized (offset=%u Hs=%u)", bestOffset, Hs);
+					}
+
+					/* Read current sample from grain buffer */
+					{
+						uint32_t grainSampleIdx = audio->wsolaGrainFramePos * channels + channelIdx;
+						histSample = (grainSampleIdx < audio->wsolaWindowSize)
+							? audio->wsolaGrainBuffer[grainSampleIdx]
+							: 0.0f;
+					}
+
+					/* Advance frame position; hop at Hs_frames boundary */
+					if (audio->wsolaGrainEngineReady && channelIdx == channels - 1) {
+						audio->wsolaGrainFramePos++;
+						if (audio->wsolaGrainFramePos >= Hs_frames) {
+							/* HOP: shift buffer left by Hs samples, OLA next grain */
+							uint32_t i;
+							uint32_t newOffset;
+							FAudio_memmove(
+								audio->wsolaGrainBuffer,
+								audio->wsolaGrainBuffer + Hs,
+								(audio->wsolaWindowSize - Hs) * sizeof(float)
+							);
+							FAudio_zero(
+								audio->wsolaGrainBuffer + (audio->wsolaWindowSize - Hs),
+								Hs * sizeof(float)
+							);
+							newOffset = FAudio_INTERNAL_FindBestSegment(
+								audio,
+								audio->wsolaLastValidSegment_Snapshot,
+								audio->wsolaWindowSize
+							);
+							audio->wsolaBestOffset = newOffset;
+							for (i = 0; i < audio->wsolaWindowSize; i++) {
+								uint32_t hPos = (
+									audio->historyWriteIdx +
+									audio->historyMax -
+									(newOffset % audio->historyMax) +
+									i
+								) % audio->historyMax;
+								audio->wsolaGrainBuffer[i] += audio->historyBuffer[hPos] * audio->wsolaHannWindow[i];
+							}
+							audio->wsolaGrainFramePos = 0;
+						}
+					}
+				} else {
+					/* LEGACY: fixed trajectory sample-by-sample (original state 2 + Step A boundary OLA) */
+					uint32_t readPos = (
+						audio->wsolaSynthesisStartPos +
 						audio->historyMax -
-						(audio->wsolaPrevBestOffset % audio->historyMax) +
-						audio->wsolaWindowSize +
-						(frameIdx * channels)
+						(audio->wsolaBestOffset % audio->historyMax) +
+						audio->wsolaSynthesisIdx
 					) % audio->historyMax;
-					float prevSample = audio->historyBuffer[(prevReadPos + channelIdx) % audio->historyMax];
-					float fade = (float) frameIdx / (float) audio->wsolaBoundaryOlaFrames;
-					histSample = (prevSample * (1.0f - fade)) + (histSample * fade);
-					if (channelIdx == channels - 1) {
-						audio->wsolaBoundaryOlaFrameIdx += 1;
-						if (audio->wsolaBoundaryOlaFrameIdx >= audio->wsolaBoundaryOlaFrames) {
-							audio->wsolaBoundaryOlaActive = 0;
+					histSample = audio->historyBuffer[(readPos + channelIdx) % audio->historyMax];
+					if (!audio->wsolaDisableBoundaryOla && audio->wsolaBoundaryOlaActive && audio->wsolaBoundaryOlaFrames > 0) {
+						uint32_t frameIdx = audio->wsolaBoundaryOlaFrameIdx;
+						uint32_t prevReadPos = (
+							audio->wsolaPrevSynthesisStartPos +
+							audio->historyMax -
+							(audio->wsolaPrevBestOffset % audio->historyMax) +
+							audio->wsolaWindowSize +
+							(frameIdx * channels)
+						) % audio->historyMax;
+						float prevSample = audio->historyBuffer[(prevReadPos + channelIdx) % audio->historyMax];
+						float fade = (float) frameIdx / (float) audio->wsolaBoundaryOlaFrames;
+						histSample = (prevSample * (1.0f - fade)) + (histSample * fade);
+						if (channelIdx == channels - 1) {
+							audio->wsolaBoundaryOlaFrameIdx += 1;
+							if (audio->wsolaBoundaryOlaFrameIdx >= audio->wsolaBoundaryOlaFrames) {
+								audio->wsolaBoundaryOlaActive = 0;
+							}
 						}
 					}
 				}
-				
-				/*
-				 * Keep long-gap synthesis level-stable.
-				 * Per-sample Hann here can re-introduce near-zero dips each window.
-				 */
-				windowVal = 1.0f;
-				audio->wsolaCurrentSynthSample[channelIdx] = histSample * windowVal;
+
+				audio->wsolaCurrentSynthSample[channelIdx] = histSample;
 				
 				/* Check if valid audio has resumed */
 				if (!isSilent && !audio->wsolaInCrossfade) {
@@ -2554,9 +2629,7 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaBoundaryOlaActive = 0;
 						audio->wsolaBoundaryOlaFrameIdx = 0;
 						audio->wsolaBoundaryOlaFrames = 0;
-						audio->wsolaInCrossfade = 0;
-						audio->wsolaCrossfadeTargetSamples = 0;
-						LOG_INFO(audio, "%s", "WSOLA: Crossfade complete, returning to State 0");
+					audio->wsolaGrainEngineReady = 0;
 						
 						/* Update history with valid audio */
 						audio->historyBuffer[audio->historyWriteIdx] = output[sampleIdx];
@@ -2579,36 +2652,37 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					if (audio->wsolaSynthesisIdx >= audio->wsolaWindowSize) {
 						/* Check if current sample is still silent (gap continues) */
 						if (isSilent) {
-							/*
-							 * Keep long-gap synthesis continuous instead of bouncing
-							 * back to State 1 every 20ms, which creates audible
-							 * repeating 40ms motifs.
-							 */
-							audio->wsolaPrevSynthesisStartPos = audio->wsolaSynthesisStartPos;
-							audio->wsolaPrevBestOffset = audio->wsolaBestOffset;
-							audio->wsolaSynthesisStartPos = (
-								audio->wsolaSynthesisStartPos + audio->wsolaWindowSize
-							) % audio->historyMax;
-							audio->wsolaBestOffset = FAudio_INTERNAL_FindBestSegment(
-								audio,
-								audio->wsolaLastValidSegment_Snapshot,
-								audio->wsolaWindowSize
-							);
-							if (!audio->wsolaDisableBoundaryOla) {
-								audio->wsolaBoundaryOlaFrames = FAudio_max(1, (audio->wsolaWindowSize / (2 * channels)));
-								audio->wsolaBoundaryOlaFrameIdx = 0;
-								audio->wsolaBoundaryOlaActive = 1;
+							if (!audio->wsolaDisableGrainEngine) {
+								/* Grain engine handles re-anchor automatically via hop - just reset counter */
+								audio->wsolaSynthesisIdx = 0;
 							} else {
-								audio->wsolaBoundaryOlaFrames = 0;
-								audio->wsolaBoundaryOlaFrameIdx = 0;
-								audio->wsolaBoundaryOlaActive = 0;
+								/* LEGACY: explicit re-anchor with boundary OLA (Step A) */
+								audio->wsolaPrevSynthesisStartPos = audio->wsolaSynthesisStartPos;
+								audio->wsolaPrevBestOffset = audio->wsolaBestOffset;
+								audio->wsolaSynthesisStartPos = (
+									audio->wsolaSynthesisStartPos + audio->wsolaWindowSize
+								) % audio->historyMax;
+								audio->wsolaBestOffset = FAudio_INTERNAL_FindBestSegment(
+									audio,
+									audio->wsolaLastValidSegment_Snapshot,
+									audio->wsolaWindowSize
+								);
+								if (!audio->wsolaDisableBoundaryOla) {
+									audio->wsolaBoundaryOlaFrames = FAudio_max(1, (audio->wsolaWindowSize / (2 * channels)));
+									audio->wsolaBoundaryOlaFrameIdx = 0;
+									audio->wsolaBoundaryOlaActive = 1;
+								} else {
+									audio->wsolaBoundaryOlaFrames = 0;
+									audio->wsolaBoundaryOlaFrameIdx = 0;
+									audio->wsolaBoundaryOlaActive = 0;
+								}
+								audio->wsolaSynthesisIdx = 0;
+								LOG_INFO(
+									audio,
+									"WSOLA: Continuing long synthesis legacy (offset=%u)",
+									audio->wsolaBestOffset
+								);
 							}
-							audio->wsolaSynthesisIdx = 0;
-							LOG_INFO(
-								audio,
-								"WSOLA: Continuing long synthesis (offset=%u)",
-								audio->wsolaBestOffset
-							);
 						} else {
 							/* Valid audio resumed after synthesis window - trigger crossfade */
 							float delta = FAudio_fabsf(output[sampleIdx] - audio->wsolaCurrentSynthSample[channelIdx]);

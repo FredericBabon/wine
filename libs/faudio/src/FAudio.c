@@ -451,6 +451,9 @@ uint32_t FAudio_Release(FAudio *audio)
 		if (audio->wsolaHannWindow) {
 			audio->pFree(audio->wsolaHannWindow);
 		}
+		if (audio->wsolaGrainBuffer) {
+			audio->pFree(audio->wsolaGrainBuffer);
+		}
 
 		audio->pFree(audio);
 		FAudio_PlatformRelease();
@@ -819,6 +822,10 @@ uint32_t FAudio_Initialize(
 			audio->wsolaHannWindow[i] = 0.5f * (1.0f - FAudio_cosf(2.0f * 3.14159265359f * phase));
 		}
 	}
+
+	/* Grain engine OLA buffer (Step B) */
+	audio->wsolaGrainBuffer = (float*)audio->pMalloc(audio->wsolaWindowSize * sizeof(float));
+	FAudio_zero(audio->wsolaGrainBuffer, audio->wsolaWindowSize * sizeof(float));
 	
 	/* WSOLA state machine initialization */
 	audio->wsolaState = 0;                     /* 0=normal, 1=detecting silence, 2=synthesizing */
@@ -834,6 +841,8 @@ uint32_t FAudio_Initialize(
 	audio->wsolaBoundaryOlaFrameIdx = 0;
 	audio->wsolaBoundaryOlaFrames = 0;
 	audio->wsolaBoundaryOlaActive = 0;
+	audio->wsolaGrainFramePos = 0;
+	audio->wsolaGrainEngineReady = 0;
 	audio->wsolaLastOffset1 = 0;
 	audio->wsolaLastOffset2 = 0;
 	audio->wsolaOffsetRepeatCount = 0;
@@ -856,6 +865,8 @@ uint32_t FAudio_Initialize(
 	audio->wsolaDisableShort = (env != NULL && *env == '1') ? 1 : 0;
 	env = FAudio_getenv("FAUDIO_WSOLA_DISABLE_BOUNDARY_OLA");
 	audio->wsolaDisableBoundaryOla = (env != NULL && *env == '1') ? 1 : 0;
+	env = FAudio_getenv("FAUDIO_WSOLA_DISABLE_GRAIN_ENGINE");
+	audio->wsolaDisableGrainEngine = (env != NULL && *env == '1') ? 1 : 0;
 	if (audio->wsolaDisabled) {
 		LOG_INFO(audio, "%s", "WSOLA: disabled via FAUDIO_WSOLA_DISABLE=1")
 	}
@@ -864,6 +875,9 @@ uint32_t FAudio_Initialize(
 	}
 	if (audio->wsolaDisableBoundaryOla) {
 		LOG_INFO(audio, "%s", "WSOLA: boundary OLA disabled via FAUDIO_WSOLA_DISABLE_BOUNDARY_OLA=1")
+	}
+	if (audio->wsolaDisableGrainEngine) {
+		LOG_INFO(audio, "%s", "WSOLA: grain engine disabled via FAUDIO_WSOLA_DISABLE_GRAIN_ENGINE=1")
 	}
 	LOG_INFO(audio, "WSOLA: preset=%s", wsolaPresetName)
 	LOG_INFO(
@@ -878,13 +892,14 @@ uint32_t FAudio_Initialize(
 	)
 	LOG_INFO(
 		audio,
-		"WSOLA-CONFIG: max_silence_ms=%u resume_ms=%u interp_ms=%u short_ms=%u short_disabled=%u boundary_ola_disabled=%u xfade_enter=[%.2f..%.2f] xfade_release_max=[short %.2f / long %.2f]",
+		"WSOLA-CONFIG: max_silence_ms=%u resume_ms=%u interp_ms=%u short_ms=%u short_disabled=%u boundary_ola_disabled=%u grain_engine_disabled=%u xfade_enter=[%.2f..%.2f] xfade_release_max=[short %.2f / long %.2f]",
 		audio->wsolaMaxPureSilenceMs,
 		audio->wsolaResumeConfirmMs,
 		audio->wsolaInterpMs,
 		audio->wsolaShortWindowMs,
 		audio->wsolaDisableShort,
 		audio->wsolaDisableBoundaryOla,
+		audio->wsolaDisableGrainEngine,
 		audio->wsolaEnterXfadeMinMs,
 		audio->wsolaEnterXfadeMaxMs,
 		audio->wsolaReleaseShortXfadeMaxMs,
