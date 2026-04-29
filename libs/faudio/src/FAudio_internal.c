@@ -2478,14 +2478,8 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					/* Initialize grain engine on first frame of concealment */
 					if (!audio->wsolaGrainEngineReady && channelIdx == 0) {
 						uint32_t i;
-						uint32_t bestOffset;
+						uint32_t bestOffset = audio->wsolaBestOffset;
 						FAudio_zero(audio->wsolaGrainBuffer, audio->wsolaWindowSize * sizeof(float));
-						bestOffset = FAudio_INTERNAL_FindBestSegment(
-							audio,
-							audio->wsolaLastValidSegment_Snapshot,
-							audio->wsolaWindowSize
-						);
-						audio->wsolaBestOffset = bestOffset;
 						for (i = 0; i < audio->wsolaWindowSize; i++) {
 							uint32_t hPos = (
 								audio->historyWriteIdx +
@@ -2629,7 +2623,10 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 						audio->wsolaBoundaryOlaActive = 0;
 						audio->wsolaBoundaryOlaFrameIdx = 0;
 						audio->wsolaBoundaryOlaFrames = 0;
-					audio->wsolaGrainEngineReady = 0;
+						audio->wsolaGrainEngineReady = 0;
+						audio->wsolaInCrossfade = 0;
+						audio->wsolaCrossfadeTargetSamples = 0;
+						LOG_INFO(audio, "%s", "WSOLA: Crossfade complete, returning to State 0");
 						
 						/* Update history with valid audio */
 						audio->historyBuffer[audio->historyWriteIdx] = output[sampleIdx];
