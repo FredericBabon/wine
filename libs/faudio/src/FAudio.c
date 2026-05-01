@@ -612,6 +612,8 @@ uint32_t FAudio_Initialize(
 		uint32_t wsola_history_ms   = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_HISTORY_MS",   150, 40, 1000);
 		uint32_t wsola_max_expand_ms= FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_MAX_EXPAND_MS",200, 50, 2000);
 		uint32_t wsola_template_ms  = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_TEMPLATE_MS",  wsola_window_ms, 5, 80);
+		uint32_t wsola_recovery_blend_ms = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_RECOVERY_BLEND_MS", wsola_window_ms, 1, 120);
+		uint32_t wsola_burst_log_min = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_BURST_LOG_MIN_FRAMES", 3, 1, 120);
 		uint32_t hanning_size, hist_size, templ_size, max_expand_cnt, buf_size;
 		uint32_t i;
 
@@ -633,6 +635,20 @@ uint32_t FAudio_Initialize(
 		audio->wsolaTemplSize    = templ_size;
 		audio->wsolaMaxExpandCnt = max_expand_cnt;
 		audio->wsolaFadeOutPos   = max_expand_cnt; /* start faded: no history yet */
+		audio->wsolaRecoveryBlendSize = (48000 * wsola_recovery_blend_ms / 1000) * 2;
+		if (audio->wsolaRecoveryBlendSize < 2) {
+			audio->wsolaRecoveryBlendSize = 2;
+		}
+		if (audio->wsolaRecoveryBlendSize > hanning_size) {
+			audio->wsolaRecoveryBlendSize = hanning_size;
+		}
+		audio->wsolaBurstLogMinFrames = wsola_burst_log_min;
+		audio->wsolaConsecLostFrames = 0;
+		audio->wsolaConsecGoodFrames = 0;
+		audio->wsolaBurstCount = 0;
+		audio->wsolaBurstMaxFrames = 0;
+		audio->wsolaBurstStartUs = 0;
+		audio->wsolaBurstActive = 0;
 		audio->wsolaPrevFrameLost = 0;
 		audio->wsolaFrameSize    = 0; /* set lazily on first call */
 		audio->wsolaBufSize      = buf_size;
@@ -681,8 +697,9 @@ uint32_t FAudio_Initialize(
 		if (audio->wsolaDisabled) {
 			LOG_INFO(audio, "%s", "WSOLA: disabled via FAUDIO_WSOLA_DISABLE=1")
 		}
-		LOG_INFO(audio, "WSOLA-CONFIG: window_ms=%u history_ms=%u max_expand_ms=%u template_ms=%u disabled=%u",
-			wsola_window_ms, wsola_history_ms, wsola_max_expand_ms, wsola_template_ms, (uint32_t)audio->wsolaDisabled)
+		LOG_INFO(audio, "WSOLA-CONFIG: window_ms=%u history_ms=%u max_expand_ms=%u template_ms=%u recovery_blend_ms=%u burst_log_min_frames=%u disabled=%u",
+			wsola_window_ms, wsola_history_ms, wsola_max_expand_ms, wsola_template_ms,
+			wsola_recovery_blend_ms, wsola_burst_log_min, (uint32_t)audio->wsolaDisabled)
 	}
 
 	audio->captureDiagReceivedFirstSeen = 0;

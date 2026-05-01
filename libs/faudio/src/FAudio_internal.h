@@ -491,6 +491,14 @@ struct FAudio
 	uint32_t   wsolaFrameSize;     /* updateSize * channels (set on first call) */
 	uint32_t   wsolaMaxExpandCnt;  /* max synthetic samples before fade-out */
 	uint32_t   wsolaFadeOutPos;    /* current fade-out position */
+	uint32_t   wsolaRecoveryBlendSize; /* recovery crossfade size in samples */
+	uint32_t   wsolaBurstLogMinFrames; /* log bursts when lost streak >= this */
+	uint32_t   wsolaConsecLostFrames; /* current consecutive lost frames */
+	uint32_t   wsolaConsecGoodFrames; /* current consecutive valid frames */
+	uint32_t   wsolaBurstCount;    /* total completed bursts */
+	uint32_t   wsolaBurstMaxFrames;/* longest burst in frames */
+	uint64_t   wsolaBurstStartUs;  /* timestamp at current burst start */
+	uint8_t    wsolaBurstActive;   /* currently inside a burst */
 	uint8_t    wsolaPrevFrameLost; /* previous frame was silent */
 	uint8_t    wsolaDisabled;      /* global bypass toggle */
 

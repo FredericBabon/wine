@@ -1662,6 +1662,7 @@ static void FAudio_WSOLA_Expand(FAudio *audio, uint32_t needed)
 static void FAudio_WSOLA_Save(FAudio *audio, float *frm, uint32_t frm_size, uint8_t prev_lost)
 {
 	uint32_t han   = audio->wsolaHanningSize;
+	uint32_t blend = audio->wsolaRecoveryBlendSize;
 	float *buf     = audio->wsolaBuf;
 	float *merge   = audio->wsolaMergeBuf;
 	float *win     = audio->wsolaHannWindow;
@@ -1691,15 +1692,31 @@ static void FAudio_WSOLA_Save(FAudio *audio, float *frm, uint32_t frm_size, uint
 		audio->wsolaFrameSize = frm_size;
 	}
 
-	if (prev_lost && audio->wsolaBufLen >= han && frm_size >= han) {
+	if (blend > han) {
+		blend = han;
+	}
+	if (blend > frm_size) {
+		blend = frm_size;
+	}
+
+	if (prev_lost && blend >= 2 && audio->wsolaBufLen >= blend && frm_size >= blend) {
+		uint32_t i;
 		/* Fade-in the new real frame over the synthesized tail */
-		FAudio_WSOLA_OverlapAdd(merge, han, buf + audio->wsolaBufLen - han, frm, win);
-		FAudio_memcpy(buf + audio->wsolaBufLen - han, merge, han * sizeof(float));
+		for (i = 0; i < blend; i++) {
+			uint32_t wi = (uint32_t) (((uint64_t) i * (uint64_t) (han - 1)) / (uint64_t) (blend - 1));
+			float wl = win[han - 1 - wi];
+			float wr = win[wi];
+			merge[i] = (buf[audio->wsolaBufLen - blend + i] * wl) + (frm[i] * wr);
+		}
+
+		/* Apply smoothing to output frame directly so recovery transition is audible-safe. */
+		FAudio_memcpy(frm, merge, blend * sizeof(float));
+		FAudio_memcpy(buf + audio->wsolaBufLen - blend, merge, blend * sizeof(float));
 		/* Append remainder of the new frame beyond the OLA window */
-		if (frm_size > han) {
-			uint32_t tail = frm_size - han;
+		if (frm_size > blend) {
+			uint32_t tail = frm_size - blend;
 			if (audio->wsolaBufLen + tail <= audio->wsolaBufSize) {
-				FAudio_memcpy(buf + audio->wsolaBufLen, frm + han, tail * sizeof(float));
+				FAudio_memcpy(buf + audio->wsolaBufLen, frm + blend, tail * sizeof(float));
 				audio->wsolaBufLen += tail;
 			}
 		}
@@ -1732,7 +1749,7 @@ static void FAudio_WSOLA_Save(FAudio *audio, float *frm, uint32_t frm_size, uint
 	/* Mark start of new concealment period: reset fade-out */
 	audio->wsolaFadeOutPos = 0;
 
-	LOG_INFO(audio, "WSOLA: Save frm_size=%u prev_lost=%u buf_len=%u", frm_size, (uint32_t)prev_lost, audio->wsolaBufLen)
+	LOG_INFO(audio, "WSOLA: Save frm_size=%u prev_lost=%u buf_len=%u blend=%u", frm_size, (uint32_t)prev_lost, audio->wsolaBufLen, blend)
 }
 
 /*
@@ -1858,16 +1875,72 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 
 	/* ERROR CONCEALMENT - WSOLA */
 	if (!audio->wsolaDisabled && outChannels > 0 && output != NULL) {
+		uint64_t nowUs;
 		uint32_t wsola_frame = audio->updateSize * outChannels;
 		uint8_t frameSilent = 1;
 		uint32_t si;
+		uint32_t frameMs;
+
+		nowUs = FAudio_INTERNAL_GetMicroseconds();
+		frameMs = (audio->master->master.inputSampleRate > 0) ?
+			(uint32_t) (((uint64_t) audio->updateSize * 1000ULL) / (uint64_t) audio->master->master.inputSampleRate) :
+			0;
 		for (si = 0; si < wsola_frame && frameSilent; si++) {
 			if (output[si] != 0.0f) frameSilent = 0;
 		}
 		if (!frameSilent) {
+			if (audio->wsolaBurstActive && audio->wsolaConsecLostFrames >= audio->wsolaBurstLogMinFrames) {
+				uint64_t durUs = (nowUs >= audio->wsolaBurstStartUs) ? (nowUs - audio->wsolaBurstStartUs) : 0;
+				uint32_t lostMs = frameMs * audio->wsolaConsecLostFrames;
+				audio->wsolaBurstCount += 1;
+				if (audio->wsolaConsecLostFrames > audio->wsolaBurstMaxFrames) {
+					audio->wsolaBurstMaxFrames = audio->wsolaConsecLostFrames;
+				}
+				LOG_INFO(
+					audio,
+					"WSOLA-BURST-END: idx=%u lost_frames=%u lost_ms=%u approx_dur_ms=%u good_run_before=%u max_lost_frames=%u",
+					audio->wsolaBurstCount,
+					audio->wsolaConsecLostFrames,
+					lostMs,
+					(uint32_t) (durUs / 1000ULL),
+					audio->wsolaConsecGoodFrames,
+					audio->wsolaBurstMaxFrames
+				)
+			}
+			audio->wsolaBurstActive = 0;
+			audio->wsolaConsecGoodFrames += 1;
+			audio->wsolaConsecLostFrames = 0;
 			FAudio_WSOLA_Save(audio, output, wsola_frame, audio->wsolaPrevFrameLost);
 			audio->wsolaPrevFrameLost = 0;
 		} else {
+			if (!audio->wsolaBurstActive) {
+				audio->wsolaBurstStartUs = nowUs;
+				audio->wsolaBurstActive = 1;
+			}
+			audio->wsolaConsecLostFrames += 1;
+			audio->wsolaConsecGoodFrames = 0;
+			if (audio->wsolaConsecLostFrames == audio->wsolaBurstLogMinFrames) {
+				LOG_INFO(
+					audio,
+					"WSOLA-BURST-START: lost_frames=%u est_lost_ms=%u frame_samples=%u",
+					audio->wsolaConsecLostFrames,
+					frameMs * audio->wsolaConsecLostFrames,
+					wsola_frame
+				)
+			}
+			if (
+				audio->wsolaConsecLostFrames == 3 ||
+				audio->wsolaConsecLostFrames == 4 ||
+				audio->wsolaConsecLostFrames == 6 ||
+				audio->wsolaConsecLostFrames == 7
+			) {
+				LOG_INFO(
+					audio,
+					"WSOLA-BURST-MARK: lost_frames=%u est_lost_ms=%u",
+					audio->wsolaConsecLostFrames,
+					frameMs * audio->wsolaConsecLostFrames
+				)
+			}
 			FAudio_WSOLA_Generate(audio, output, wsola_frame);
 			audio->wsolaPrevFrameLost = 1;
 		}
