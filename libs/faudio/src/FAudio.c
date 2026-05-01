@@ -615,6 +615,7 @@ uint32_t FAudio_Initialize(
 		uint32_t wsola_history_ms   = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_HISTORY_MS",   150, 40, 1000);
 		uint32_t wsola_work_ms      = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_WORK_MS",       50, 10,  500);
 		uint32_t wsola_gap_max_ms   = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_GAP_MAX_MS",    40,  1,  500);
+		uint32_t wsola_headroom_ms  = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_HEADROOM_MS",    3,  0,   80);
 		uint32_t wsola_max_expand_ms= FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_MAX_EXPAND_MS",200, 50, 2000);
 		uint32_t wsola_template_ms  = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_TEMPLATE_MS",  wsola_window_ms, 5, 80);
 		uint32_t wsola_recovery_blend_ms = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_RECOVERY_BLEND_MS", wsola_window_ms, 1, 120);
@@ -641,6 +642,7 @@ uint32_t FAudio_Initialize(
 		audio->wsolaHistSize     = hist_size;
 		audio->wsolaTemplSize    = templ_size;
 		audio->wsolaMaxExpandCnt = max_expand_cnt;
+		audio->wsolaHeadroomSamples = (48000 * wsola_headroom_ms / 1000) * 2;
 		audio->wsolaFadeOutPos   = max_expand_cnt; /* start faded: no history yet */
 		audio->wsolaRecoveryBlendSize = (48000 * wsola_recovery_blend_ms / 1000) * 2;
 		if (audio->wsolaRecoveryBlendSize < 2) {
@@ -721,9 +723,9 @@ uint32_t FAudio_Initialize(
 		if (audio->wsolaDisabled) {
 			LOG_INFO(audio, "%s", "WSOLA: disabled via FAUDIO_WSOLA_DISABLE=1")
 		}
-		LOG_INFO(audio, "WSOLA-CONFIG: window_ms=%u history_ms=%u work_ms=%u gap_max_ms=%u max_expand_ms=%u template_ms=%u recovery_blend_ms=%u burst_log_min_frames=%u transition_fsm=%u disabled=%u",
+		LOG_INFO(audio, "WSOLA-CONFIG: window_ms=%u history_ms=%u work_ms=%u gap_max_ms=%u headroom_ms=%u max_expand_ms=%u template_ms=%u recovery_blend_ms=%u burst_log_min_frames=%u transition_fsm=%u disabled=%u",
 			wsola_window_ms, wsola_history_ms, wsola_work_ms, wsola_gap_max_ms,
-			wsola_max_expand_ms, wsola_template_ms, wsola_recovery_blend_ms,
+			wsola_headroom_ms, wsola_max_expand_ms, wsola_template_ms, wsola_recovery_blend_ms,
 			wsola_burst_log_min, (uint32_t) audio->wsolaTransitionFSM,
 			(uint32_t)audio->wsolaDisabled)
 	}

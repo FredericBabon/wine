@@ -1775,7 +1775,8 @@ static void FAudio_WSOLA_Save(FAudio *audio, float *frm, uint32_t frm_size, uint
  */
 static void FAudio_WSOLA_Generate(FAudio *audio, float *frm, uint32_t frm_size)
 {
-	uint32_t needed = audio->wsolaHistSize + frm_size + audio->wsolaHanningSize * 2;
+	uint32_t headroom = audio->wsolaHeadroomSamples;
+	uint32_t needed = audio->wsolaHistSize + frm_size + headroom + audio->wsolaHanningSize * 2;
 	if (
 		audio == NULL ||
 		frm == NULL ||
@@ -1801,11 +1802,46 @@ static void FAudio_WSOLA_Generate(FAudio *audio, float *frm, uint32_t frm_size)
 		audio->wsolaBufLen >= audio->wsolaHistSize + frm_size &&
 		audio->wsolaHistSize + frm_size <= audio->wsolaBufSize
 	) {
-		FAudio_memcpy(frm, audio->wsolaBuf + audio->wsolaHistSize, frm_size * sizeof(float));
-		/* slide buf forward by frm_size */
-		if (audio->wsolaBufLen > frm_size) {
-			FAudio_memmove(audio->wsolaBuf, audio->wsolaBuf + frm_size, (audio->wsolaBufLen - frm_size) * sizeof(float));
-			audio->wsolaBufLen -= frm_size;
+		uint32_t bestOffset = 0;
+		float bestEnergy = -1.0f;
+		uint32_t off;
+		uint32_t consume;
+
+		if (audio->wsolaHistSize + frm_size + headroom > audio->wsolaBufLen) {
+			headroom = (audio->wsolaBufLen > audio->wsolaHistSize + frm_size) ?
+				(audio->wsolaBufLen - (audio->wsolaHistSize + frm_size)) :
+				0;
+		}
+
+		/* Probe small offsets and keep the least-flat segment by RMS energy. */
+		for (off = 0; off <= headroom; off += 1) {
+			uint32_t i;
+			float energy = 0.0f;
+			float *cand = audio->wsolaBuf + audio->wsolaHistSize + off;
+			for (i = 0; i < frm_size; i += 1) {
+				float s = cand[i];
+				energy += s * s;
+			}
+			if (energy > bestEnergy) {
+				bestEnergy = energy;
+				bestOffset = off;
+			}
+		}
+
+		FAudio_memcpy(
+			frm,
+			audio->wsolaBuf + audio->wsolaHistSize + bestOffset,
+			frm_size * sizeof(float)
+		);
+
+		consume = frm_size + bestOffset;
+		if (consume < audio->wsolaBufLen) {
+			FAudio_memmove(
+				audio->wsolaBuf,
+				audio->wsolaBuf + consume,
+				(audio->wsolaBufLen - consume) * sizeof(float)
+			);
+			audio->wsolaBufLen -= consume;
 		} else {
 			audio->wsolaBufLen = 0;
 		}
@@ -2057,15 +2093,56 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 				(maxSilentRunFrames * outChannels) <= audio->wsolaGapMaxSamples
 			) {
 				FAudio_WSOLA_Generate(audio, audio->wsolaWorkBuf, wsola_frame);
-				for (fi = 0; fi < outputFrames; fi += 1) {
-					if (FAudio_WSOLA_IsFrameSilent(output, fi, outChannels)) {
-						FAudio_memcpy(
-							output + (fi * outChannels),
-							audio->wsolaWorkBuf + (fi * outChannels),
-							outChannels * sizeof(float)
-						);
-						partialWasPatched = 1;
+				fi = 0;
+				while (fi < outputFrames) {
+					uint32_t runStart;
+					uint32_t runEnd;
+					uint32_t runFrames;
+					uint32_t blendFrames = 0;
+					uint32_t k;
+
+					if (!FAudio_WSOLA_IsFrameSilent(output, fi, outChannels)) {
+						fi += 1;
+						continue;
 					}
+
+					runStart = fi;
+					while (fi < outputFrames && FAudio_WSOLA_IsFrameSilent(output, fi, outChannels)) {
+						fi += 1;
+					}
+					runEnd = fi;
+					runFrames = runEnd - runStart;
+
+					if ((runFrames * outChannels) > audio->wsolaGapMaxSamples) {
+						continue;
+					}
+
+					if (runStart > 0 && runEnd < outputFrames) {
+						blendFrames = FAudio_min(2, runFrames);
+					}
+
+					for (k = 0; k < runFrames; k += 1) {
+						uint32_t c;
+						for (c = 0; c < outChannels; c += 1) {
+							float sample = audio->wsolaWorkBuf[((runStart + k) * outChannels) + c];
+
+							if (blendFrames > 0 && k < blendFrames) {
+								float left = output[((runStart - 1) * outChannels) + c];
+								float alpha = (float) (k + 1) / (float) (blendFrames + 1);
+								sample = left + ((sample - left) * alpha);
+							}
+
+							if (blendFrames > 0 && k >= runFrames - blendFrames) {
+								float right = output[(runEnd * outChannels) + c];
+								float alpha = (float) (runFrames - k) / (float) (blendFrames + 1);
+								sample = right + ((sample - right) * alpha);
+							}
+
+							output[((runStart + k) * outChannels) + c] = sample;
+						}
+					}
+
+					partialWasPatched = 1;
 				}
 			}
 		}

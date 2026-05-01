@@ -493,6 +493,7 @@ struct FAudio
 	uint32_t   wsolaTemplSize;     /* template size for find_pitch */
 	uint32_t   wsolaFrameSize;     /* updateSize * channels (set on first call) */
 	uint32_t   wsolaMaxExpandCnt;  /* max synthetic samples before fade-out */
+	uint32_t   wsolaHeadroomSamples; /* extra generated samples to avoid flat tails */
 	uint32_t   wsolaFadeOutPos;    /* current fade-out position */
 	uint32_t   wsolaRecoveryBlendSize; /* recovery crossfade size in samples */
 	uint32_t   wsolaBurstLogMinFrames; /* log bursts when lost streak >= this */
