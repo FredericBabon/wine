@@ -479,76 +479,20 @@ struct FAudio
 	/* Platform opaque pointer */
 	void *platform;
 
-	/* Audio Replacement / WSOLA (Waveform Similarity-Based Overlap-Add) */
-	float *historyBuffer;                      /* Configurable history buffer (default 200ms @ 48kHz stereo) */
-	uint32_t historyMax;                       /* Capacity of history buffer */
-	uint32_t historyWriteIdx;                  /* Write pointer (advances with valid audio) */
-	
-	/* Double-buffer for last valid segment (configurable window, default 20ms) */
-	float *wsolaLastValidSegment_Active;       /* Currently being filled with valid audio */
-	float *wsolaLastValidSegment_Snapshot;     /* Snapshot (guaranteed complete window) for pattern matching */
-	uint32_t wsolaSegmentIdx;                  /* Index in Active buffer (0-windowSize) */
-	uint32_t wsolaSegmentCountdownMs;          /* Legacy counter kept for diagnostics */
-	
-	/* Silence detection and synthesis */
-	uint32_t wsolaSilenceDurationSamples;      /* Counts silence until 1920 samples (20ms) */
-	uint32_t wsolaConcealmentDurationSamples;  /* Actual concealed interleaved samples (diagnostic/tracking) */
-	uint32_t wsolaPureSilentSamples;           /* Consecutive interleaved samples with all channels at 0 */
-	uint32_t wsolaValidRunSamples;             /* Consecutive non-silent samples while concealed */
-	uint8_t wsolaState;                        /* 0=normal, 1=detecting silence, 2=synthesizing */
-	uint8_t wsolaHasValidHistory;              /* Set after first non-silent output reaches history */
-	uint8_t wsolaHasSnapshot;                  /* Set after first full 20ms snapshot is captured */
-	uint8_t wsolaIntentionalSilence;           /* Silence bypass mode after concealment timeout */
-	
-	/* Synthesis state (persistent across 10ms calls) */
-	uint32_t wsolaSynthesisIdx;                /* Current position in synthesis window (0-1920) */
-	uint32_t wsolaSynthesisStartPos;           /* Snapshot of historyWriteIdx when synthesis started */
-	uint32_t wsolaBestOffset;                  /* Best match offset in history (found via correlation) */
-	uint32_t wsolaPrevSynthesisStartPos;       /* Previous synthesis base for boundary overlap */
-	uint32_t wsolaPrevBestOffset;              /* Previous offset for boundary overlap */
-	uint32_t wsolaBoundaryOlaFrameIdx;         /* Frame index inside boundary overlap region */
-	uint32_t wsolaBoundaryOlaFrames;           /* Boundary overlap length in frames */
-	uint8_t wsolaBoundaryOlaActive;            /* Flag: blend previous/new trajectory at re-anchor */
-
-	/* Grain engine (Step B): canonical hop=Hs=N/2 OLA synthesis for State 2 */
-	float *wsolaGrainBuffer;                   /* OLA accumulator buffer (wsolaWindowSize samples) */
-	uint32_t wsolaGrainFramePos;               /* Current read-frame position in grain buffer (0..Hs_frames-1) */
-	uint8_t wsolaGrainEngineReady;             /* Grain engine initialized for current concealment period */
-	uint8_t wsolaDisableGrainEngine;           /* Runtime toggle: bypass grain engine, use legacy state 2 */
-	uint32_t wsolaLastOffset1;                 /* Last selected offset (for anti-repetition) */
-	uint32_t wsolaLastOffset2;                 /* Previous offset before last (for anti-repetition) */
-	uint32_t wsolaOffsetRepeatCount;           /* Repeated/near-identical offset streak length */
-	uint32_t wsolaOffsetSelectionCount;        /* Selection counter for throttled debug logs */
-	float wsolaCurrentSynthSample[FAUDIO_MAX_AUDIO_CHANNELS]; /* Per-channel synthesized sample (for crossfade) */
-	uint8_t wsolaHasOffsetHistory;             /* Offset history initialized */
-	
-	/* Crossfade state */
-	uint32_t wsolaCrossfadeIdx;                /* Crossfade progress (0-960 for 10ms fade) */
-	uint32_t wsolaCrossfadeTargetSamples;      /* Adaptive synth->valid crossfade length */
-	uint8_t wsolaInCrossfade;                  /* Flag: currently crossfading out of synthesis */
-	uint8_t wsolaEnteringCrossfade;            /* Flag: currently fading IN to synthesis */
-	uint32_t wsolaEnteringCrossfadeIdx;        /* Progress of entering crossfade (0-960 for 10ms) */
-	uint32_t wsolaEnteringCrossfadeTargetSamples; /* Adaptive valid->synth crossfade length */
-	uint32_t wsolaEnteringCrossfadeStartPos;   /* History cursor for entering crossfade */
-	
-	/* Window function and constants */
-	float *wsolaHannWindow;                    /* Hann window for WSOLA (configurable) */
-	uint32_t wsolaWindowSize;                  /* Samples per WSOLA window (default 20ms @ 48kHz stereo) */
-	uint8_t wsolaDisabled;                     /* Runtime toggle: bypass WSOLA processing */
-	uint8_t wsolaDisableShort;                 /* Runtime toggle: bypass short-WSOLA branch in State 1 */
-	uint8_t wsolaDisableBoundaryOla;           /* Runtime toggle: bypass boundary OLA at State 2 re-anchor */
-	uint32_t wsolaSearchBaseWindows;           /* Base search range in window units */
-	uint32_t wsolaSearchEscalatedWindows;      /* Escalated search range in window units */
-	uint32_t wsolaSearchMaxCandidates;         /* Max candidates evaluated per selection */
-	float wsolaAltCorrTolerance;               /* Accept alternate offset when corr drop <= tolerance */
-	uint32_t wsolaMaxPureSilenceMs;            /* Pure silence timeout before intentional silence mode */
-	uint32_t wsolaResumeConfirmMs;             /* Stable valid run required before leaving concealment */
-	uint32_t wsolaInterpMs;                    /* Hybrid interpolation branch duration */
-	uint32_t wsolaShortWindowMs;               /* Hybrid short-WSOLA window duration */
-	float wsolaEnterXfadeMinMs;                /* Entering crossfade minimum duration */
-	float wsolaEnterXfadeMaxMs;                /* Entering crossfade maximum duration */
-	float wsolaReleaseShortXfadeMaxMs;         /* Release crossfade max duration for short-hole branch */
-	float wsolaReleaseLongXfadeMaxMs;          /* Release crossfade max duration for long synthesis */
+	/* Audio Replacement / WSOLA */
+	float     *wsolaBuf;           /* flat history+synthesis buffer (FRAME_CNT * frame + hist) */
+	float     *wsolaMergeBuf;      /* temp OLA buffer (hanning_size samples) */
+	float     *wsolaHannWindow;    /* Hann window (hanning_size samples) */
+	uint32_t   wsolaBufSize;       /* total allocated capacity (samples) */
+	uint32_t   wsolaBufLen;        /* current used length (samples) */
+	uint32_t   wsolaHistSize;      /* history = ~1.5 * frame_size */
+	uint32_t   wsolaHanningSize;   /* OLA window size in samples */
+	uint32_t   wsolaTemplSize;     /* template size for find_pitch */
+	uint32_t   wsolaFrameSize;     /* updateSize * channels (set on first call) */
+	uint32_t   wsolaMaxExpandCnt;  /* max synthetic samples before fade-out */
+	uint32_t   wsolaFadeOutPos;    /* current fade-out position */
+	uint8_t    wsolaPrevFrameLost; /* previous frame was silent */
+	uint8_t    wsolaDisabled;      /* global bypass toggle */
 
 	/* Audio Capture for Debugging (PCM 32F interleaved) */
 	void* captureFile;
