@@ -442,6 +442,9 @@ uint32_t FAudio_Release(FAudio *audio)
 		if (audio->wsolaBuf) {
 			audio->pFree(audio->wsolaBuf);
 		}
+		if (audio->wsolaWorkBuf) {
+			audio->pFree(audio->wsolaWorkBuf);
+		}
 		if (audio->wsolaHannWindow) {
 			audio->pFree(audio->wsolaHannWindow);
 		}
@@ -610,11 +613,13 @@ uint32_t FAudio_Initialize(
 	{
 		uint32_t wsola_window_ms    = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_WINDOW_MS",     10,  5,   80);
 		uint32_t wsola_history_ms   = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_HISTORY_MS",   150, 40, 1000);
+		uint32_t wsola_work_ms      = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_WORK_MS",       50, 10,  500);
+		uint32_t wsola_gap_max_ms   = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_GAP_MAX_MS",    40,  1,  500);
 		uint32_t wsola_max_expand_ms= FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_MAX_EXPAND_MS",200, 50, 2000);
 		uint32_t wsola_template_ms  = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_TEMPLATE_MS",  wsola_window_ms, 5, 80);
 		uint32_t wsola_recovery_blend_ms = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_RECOVERY_BLEND_MS", wsola_window_ms, 1, 120);
 		uint32_t wsola_burst_log_min = FAudio_INTERNAL_ReadEnvUInt("FAUDIO_WSOLA_BURST_LOG_MIN_FRAMES", 3, 1, 120);
-		uint32_t hanning_size, hist_size, templ_size, max_expand_cnt, buf_size;
+		uint32_t hanning_size, hist_size, templ_size, max_expand_cnt, buf_size, work_size;
 		uint32_t i;
 
 		if (wsola_template_ms > wsola_window_ms) wsola_template_ms = wsola_window_ms;
@@ -622,10 +627,12 @@ uint32_t FAudio_Initialize(
 		hanning_size   = (48000 * wsola_window_ms   / 1000) * 2;
 		hist_size      = (48000 * wsola_history_ms  / 1000) * 2;
 		templ_size     = (48000 * wsola_template_ms / 1000) * 2;
+		work_size      = (48000 * wsola_work_ms / 1000) * 2;
 		max_expand_cnt = (48000 * wsola_max_expand_ms / 1000) * 2;
 		if (templ_size > hanning_size) templ_size = hanning_size;
 		if (hanning_size < 2) hanning_size = 2;
 		if (templ_size < 1) templ_size = 1;
+		if (work_size < hanning_size) work_size = hanning_size;
 		if (max_expand_cnt < hanning_size) max_expand_cnt = hanning_size;
 
 		buf_size = 6 * (hanning_size > 960 ? hanning_size : 960) + hist_size + hanning_size;
@@ -649,22 +656,35 @@ uint32_t FAudio_Initialize(
 		audio->wsolaBurstMaxFrames = 0;
 		audio->wsolaBurstStartUs = 0;
 		audio->wsolaBurstActive = 0;
+		audio->wsolaTransitionFSM = 1;
+		audio->wsolaTransitionState = 0;
 		audio->wsolaPrevFrameLost = 0;
 		audio->wsolaFrameSize    = 0; /* set lazily on first call */
 		audio->wsolaBufSize      = buf_size;
+		audio->wsolaWorkSize     = work_size;
+		audio->wsolaGapMaxSamples = (48000 * wsola_gap_max_ms / 1000) * 2;
+		if (audio->wsolaGapMaxSamples < 2) {
+			audio->wsolaGapMaxSamples = 2;
+		}
 
 		audio->wsolaBuf = (float*)audio->pMalloc(buf_size * sizeof(float));
+		audio->wsolaWorkBuf = (float*)audio->pMalloc(work_size * sizeof(float));
 		audio->wsolaHannWindow = (float*)audio->pMalloc(hanning_size * sizeof(float));
 		audio->wsolaMergeBuf = (float*)audio->pMalloc(hanning_size * sizeof(float));
 
 		if (
 			audio->wsolaBuf == NULL ||
+			audio->wsolaWorkBuf == NULL ||
 			audio->wsolaHannWindow == NULL ||
 			audio->wsolaMergeBuf == NULL
 		) {
 			if (audio->wsolaBuf != NULL) {
 				audio->pFree(audio->wsolaBuf);
 				audio->wsolaBuf = NULL;
+			}
+			if (audio->wsolaWorkBuf != NULL) {
+				audio->pFree(audio->wsolaWorkBuf);
+				audio->wsolaWorkBuf = NULL;
 			}
 			if (audio->wsolaHannWindow != NULL) {
 				audio->pFree(audio->wsolaHannWindow);
@@ -676,10 +696,12 @@ uint32_t FAudio_Initialize(
 			}
 			audio->wsolaBufSize = 0;
 			audio->wsolaBufLen = 0;
+			audio->wsolaWorkSize = 0;
 			audio->wsolaDisabled = 1;
 			LOG_INFO(audio, "%s", "WSOLA: disabled (allocation failure)")
 		} else {
 			FAudio_zero(audio->wsolaBuf, buf_size * sizeof(float));
+			FAudio_zero(audio->wsolaWorkBuf, work_size * sizeof(float));
 			audio->wsolaBufLen = hist_size + hanning_size; /* pre-populate silence */
 
 			for (i = 0; i < hanning_size; i++) {
@@ -694,12 +716,16 @@ uint32_t FAudio_Initialize(
 		if (!audio->wsolaDisabled) {
 			audio->wsolaDisabled = (env != NULL && *env == '1') ? 1 : 0;
 		}
+		env = FAudio_getenv("FAUDIO_WSOLA_TRANSITION_FSM");
+		audio->wsolaTransitionFSM = (env != NULL && *env == '0') ? 0 : 1;
 		if (audio->wsolaDisabled) {
 			LOG_INFO(audio, "%s", "WSOLA: disabled via FAUDIO_WSOLA_DISABLE=1")
 		}
-		LOG_INFO(audio, "WSOLA-CONFIG: window_ms=%u history_ms=%u max_expand_ms=%u template_ms=%u recovery_blend_ms=%u burst_log_min_frames=%u disabled=%u",
-			wsola_window_ms, wsola_history_ms, wsola_max_expand_ms, wsola_template_ms,
-			wsola_recovery_blend_ms, wsola_burst_log_min, (uint32_t)audio->wsolaDisabled)
+		LOG_INFO(audio, "WSOLA-CONFIG: window_ms=%u history_ms=%u work_ms=%u gap_max_ms=%u max_expand_ms=%u template_ms=%u recovery_blend_ms=%u burst_log_min_frames=%u transition_fsm=%u disabled=%u",
+			wsola_window_ms, wsola_history_ms, wsola_work_ms, wsola_gap_max_ms,
+			wsola_max_expand_ms, wsola_template_ms, wsola_recovery_blend_ms,
+			wsola_burst_log_min, (uint32_t) audio->wsolaTransitionFSM,
+			(uint32_t)audio->wsolaDisabled)
 	}
 
 	audio->captureDiagReceivedFirstSeen = 0;

@@ -1500,6 +1500,23 @@ static void FAUDIOCALL FAudio_INTERNAL_GenerateOutput(FAudio *audio, float *outp
 
 /* WSOLA implementation */
 
+#define FAUDIO_WSOLA_TRANSITION_STABLE   0
+#define FAUDIO_WSOLA_TRANSITION_ENTER_GAP 1
+#define FAUDIO_WSOLA_TRANSITION_IN_GAP   2
+#define FAUDIO_WSOLA_TRANSITION_EXIT_GAP 3
+#define FAUDIO_WSOLA_TRANSITION_RECOVERY 4
+
+static uint8_t FAudio_WSOLA_IsFrameSilent(const float *frm, uint32_t frame_index, uint32_t channels)
+{
+	uint32_t channel_index;
+	for (channel_index = 0; channel_index < channels; channel_index += 1) {
+		if (frm[(frame_index * channels) + channel_index] != 0.0f) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 /*
  * FAudio_WSOLA_FindPitch - find pitch period by normalized correlation.
  * Returns pointer into wsolaBuf where the best template match starts.
@@ -1802,6 +1819,108 @@ static void FAudio_WSOLA_Generate(FAudio *audio, float *frm, uint32_t frm_size)
 	LOG_INFO(audio, "WSOLA: Generate frm_size=%u buf_len=%u fade_pos=%u", frm_size, audio->wsolaBufLen, audio->wsolaFadeOutPos)
 }
 
+/*
+ * FAudio_WSOLA_RepairShortSilentRuns - fill short zero-only runs inside a frame.
+ * This catches sub-frame holes that never trip the whole-frame WSOLA path.
+ */
+static void FAudio_WSOLA_RepairShortSilentRuns(
+	FAudio *audio,
+	float *frm,
+	uint32_t frame_count,
+	uint32_t channels
+)
+{
+	uint32_t max_gap_frames;
+	uint32_t frame_index;
+
+	if (
+		audio == NULL ||
+		frm == NULL ||
+		frame_count < 3 ||
+		channels == 0 ||
+		audio->wsolaHanningSize < channels
+	) {
+		return;
+	}
+
+	max_gap_frames = audio->wsolaHanningSize / channels;
+	if (audio->wsolaGapMaxSamples >= channels) {
+		max_gap_frames = audio->wsolaGapMaxSamples / channels;
+	}
+	if (max_gap_frames == 0) {
+		return;
+	}
+
+	frame_index = 1;
+	while (frame_index + 1 < frame_count) {
+		uint32_t run_start = frame_index;
+		uint32_t run_end;
+		uint32_t gap_frames;
+		uint32_t channel_index;
+		uint8_t silent = 1;
+		uint8_t left_silent = 1;
+		uint8_t right_silent = 1;
+
+		for (channel_index = 0; channel_index < channels; channel_index += 1) {
+			if (frm[(frame_index * channels) + channel_index] != 0.0f) {
+				silent = 0;
+				break;
+			}
+		}
+		if (!silent) {
+			frame_index += 1;
+			continue;
+		}
+
+		run_end = frame_index;
+		while (run_end < frame_count) {
+			silent = 1;
+			for (channel_index = 0; channel_index < channels; channel_index += 1) {
+				if (frm[(run_end * channels) + channel_index] != 0.0f) {
+					silent = 0;
+					break;
+				}
+			}
+			if (!silent) {
+				break;
+			}
+			run_end += 1;
+		}
+
+		gap_frames = run_end - run_start;
+		if (run_start == 0 || run_end >= frame_count || gap_frames > max_gap_frames) {
+			frame_index = run_end;
+			continue;
+		}
+
+		for (channel_index = 0; channel_index < channels; channel_index += 1) {
+			if (frm[((run_start - 1) * channels) + channel_index] != 0.0f) {
+				left_silent = 0;
+			}
+			if (frm[(run_end * channels) + channel_index] != 0.0f) {
+				right_silent = 0;
+			}
+		}
+		if (left_silent || right_silent) {
+			frame_index = run_end;
+			continue;
+		}
+
+		for (channel_index = 0; channel_index < channels; channel_index += 1) {
+			float left = frm[((run_start - 1) * channels) + channel_index];
+			float right = frm[(run_end * channels) + channel_index];
+			uint32_t gap_index;
+
+			for (gap_index = 0; gap_index < gap_frames; gap_index += 1) {
+				float t = (float) (gap_index + 1) / (float) (gap_frames + 1);
+				frm[((run_start + gap_index) * channels) + channel_index] = left + ((right - left) * t);
+			}
+		}
+
+		frame_index = run_end;
+	}
+}
+
 void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 {
 	uint32_t outChannels = audio->mixFormat.Format.nChannels;
@@ -1878,16 +1997,106 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 		uint64_t nowUs;
 		uint32_t wsola_frame = audio->updateSize * outChannels;
 		uint8_t frameSilent = 1;
+		uint8_t hasSilentFrames = 0;
+		uint8_t partialWasPatched = 0;
+		uint8_t prevTransitionState = audio->wsolaTransitionState;
+		uint32_t leadingSilentFrames = 0;
+		uint32_t trailingSilentFrames = 0;
+		uint32_t maxSilentRunFrames = 0;
+		uint32_t currentSilentRunFrames = 0;
+		uint8_t seenNonSilentFrame = 0;
+		uint32_t maxRepairFrames = 1;
 		uint32_t si;
+		uint32_t fi;
 		uint32_t frameMs;
 
 		nowUs = FAudio_INTERNAL_GetMicroseconds();
+		FAudio_WSOLA_RepairShortSilentRuns(audio, output, outputFrames, outChannels);
 		frameMs = (audio->master->master.inputSampleRate > 0) ?
 			(uint32_t) (((uint64_t) audio->updateSize * 1000ULL) / (uint64_t) audio->master->master.inputSampleRate) :
 			0;
+		if (wsola_frame > 0 && audio->wsolaGapMaxSamples >= wsola_frame) {
+			maxRepairFrames = audio->wsolaGapMaxSamples / wsola_frame;
+			if (maxRepairFrames == 0) {
+				maxRepairFrames = 1;
+			}
+		}
+		for (fi = 0; fi < outputFrames; fi += 1) {
+			uint8_t silentFrame = FAudio_WSOLA_IsFrameSilent(output, fi, outChannels);
+			if (silentFrame) {
+				hasSilentFrames = 1;
+				currentSilentRunFrames += 1;
+				if (!seenNonSilentFrame) {
+					leadingSilentFrames += 1;
+				}
+			} else {
+				frameSilent = 0;
+				seenNonSilentFrame = 1;
+				if (currentSilentRunFrames > maxSilentRunFrames) {
+					maxSilentRunFrames = currentSilentRunFrames;
+				}
+				currentSilentRunFrames = 0;
+			}
+		}
+		if (currentSilentRunFrames > maxSilentRunFrames) {
+			maxSilentRunFrames = currentSilentRunFrames;
+		}
+		if (hasSilentFrames && !frameSilent) {
+			for (fi = outputFrames; fi > 0; fi -= 1) {
+				if (!FAudio_WSOLA_IsFrameSilent(output, fi - 1, outChannels)) {
+					break;
+				}
+				trailingSilentFrames += 1;
+			}
+
+			if (
+				audio->wsolaTransitionFSM &&
+				audio->wsolaWorkBuf != NULL &&
+				audio->wsolaWorkSize >= wsola_frame &&
+				audio->wsolaGapMaxSamples > 0 &&
+				(maxSilentRunFrames * outChannels) <= audio->wsolaGapMaxSamples
+			) {
+				FAudio_WSOLA_Generate(audio, audio->wsolaWorkBuf, wsola_frame);
+				for (fi = 0; fi < outputFrames; fi += 1) {
+					if (FAudio_WSOLA_IsFrameSilent(output, fi, outChannels)) {
+						FAudio_memcpy(
+							output + (fi * outChannels),
+							audio->wsolaWorkBuf + (fi * outChannels),
+							outChannels * sizeof(float)
+						);
+						partialWasPatched = 1;
+					}
+				}
+			}
+		}
+
 		for (si = 0; si < wsola_frame && frameSilent; si++) {
 			if (output[si] != 0.0f) frameSilent = 0;
 		}
+		if (audio->wsolaTransitionFSM) {
+			if (frameSilent) {
+				audio->wsolaTransitionState = audio->wsolaPrevFrameLost ?
+					FAUDIO_WSOLA_TRANSITION_IN_GAP :
+					FAUDIO_WSOLA_TRANSITION_ENTER_GAP;
+			} else if (partialWasPatched || (hasSilentFrames && maxSilentRunFrames > 0)) {
+				if (audio->wsolaPrevFrameLost || (leadingSilentFrames > 0 && trailingSilentFrames == 0)) {
+					audio->wsolaTransitionState = FAUDIO_WSOLA_TRANSITION_EXIT_GAP;
+				} else if (trailingSilentFrames > 0 && leadingSilentFrames == 0) {
+					audio->wsolaTransitionState = FAUDIO_WSOLA_TRANSITION_ENTER_GAP;
+				} else {
+					audio->wsolaTransitionState = FAUDIO_WSOLA_TRANSITION_RECOVERY;
+				}
+			} else if (audio->wsolaPrevFrameLost) {
+				audio->wsolaTransitionState = FAUDIO_WSOLA_TRANSITION_EXIT_GAP;
+			} else if (prevTransitionState == FAUDIO_WSOLA_TRANSITION_EXIT_GAP) {
+				audio->wsolaTransitionState = FAUDIO_WSOLA_TRANSITION_RECOVERY;
+			} else if (prevTransitionState == FAUDIO_WSOLA_TRANSITION_RECOVERY) {
+				audio->wsolaTransitionState = FAUDIO_WSOLA_TRANSITION_STABLE;
+			} else {
+				audio->wsolaTransitionState = FAUDIO_WSOLA_TRANSITION_STABLE;
+			}
+		}
+
 		if (!frameSilent) {
 			if (audio->wsolaBurstActive && audio->wsolaConsecLostFrames >= audio->wsolaBurstLogMinFrames) {
 				uint64_t durUs = (nowUs >= audio->wsolaBurstStartUs) ? (nowUs - audio->wsolaBurstStartUs) : 0;
@@ -1941,8 +2150,13 @@ void FAudio_INTERNAL_UpdateEngine(FAudio *audio, float *output)
 					frameMs * audio->wsolaConsecLostFrames
 				)
 			}
-			FAudio_WSOLA_Generate(audio, output, wsola_frame);
-			audio->wsolaPrevFrameLost = 1;
+			if (audio->wsolaConsecLostFrames <= maxRepairFrames) {
+				FAudio_WSOLA_Generate(audio, output, wsola_frame);
+				audio->wsolaPrevFrameLost = 1;
+			} else {
+				/* V1 policy: do not conceal gaps larger than configured threshold */
+				audio->wsolaPrevFrameLost = 0;
+			}
 		}
 	}
 

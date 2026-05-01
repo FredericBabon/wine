@@ -481,10 +481,13 @@ struct FAudio
 
 	/* Audio Replacement / WSOLA */
 	float     *wsolaBuf;           /* flat history+synthesis buffer (FRAME_CNT * frame + hist) */
+	float     *wsolaWorkBuf;       /* per-callback work buffer for transition repair */
 	float     *wsolaMergeBuf;      /* temp OLA buffer (hanning_size samples) */
 	float     *wsolaHannWindow;    /* Hann window (hanning_size samples) */
 	uint32_t   wsolaBufSize;       /* total allocated capacity (samples) */
 	uint32_t   wsolaBufLen;        /* current used length (samples) */
+	uint32_t   wsolaWorkSize;      /* work buffer capacity (samples) */
+	uint32_t   wsolaGapMaxSamples; /* max silent run to repair (samples, interleaved) */
 	uint32_t   wsolaHistSize;      /* history = ~1.5 * frame_size */
 	uint32_t   wsolaHanningSize;   /* OLA window size in samples */
 	uint32_t   wsolaTemplSize;     /* template size for find_pitch */
@@ -499,6 +502,8 @@ struct FAudio
 	uint32_t   wsolaBurstMaxFrames;/* longest burst in frames */
 	uint64_t   wsolaBurstStartUs;  /* timestamp at current burst start */
 	uint8_t    wsolaBurstActive;   /* currently inside a burst */
+	uint8_t    wsolaTransitionFSM; /* enable sample-aware transition handling */
+	uint8_t    wsolaTransitionState; /* transition state marker */
 	uint8_t    wsolaPrevFrameLost; /* previous frame was silent */
 	uint8_t    wsolaDisabled;      /* global bypass toggle */
 
