@@ -113,10 +113,14 @@ static HRESULT FAudio_FillAudioClientBuffer(
 	struct FAudioAudioClientThreadArgs *args,
 	IAudioRenderClient *client,
 	UINT frames,
-	UINT padding
+	UINT padding,
+	UINT *chunksFilled,
+	UINT *framesSubmitted
 ) {
 	HRESULT hr = S_OK;
 	BYTE *buffer;
+	UINT chunks = 0;
+	UINT submitted = 0;
 
 	while (padding + args->updateSize <= frames)
 	{
@@ -148,6 +152,17 @@ static HRESULT FAudio_FillAudioClientBuffer(
 		if (FAILED(hr)) return hr;
 
 		padding += args->updateSize;
+		chunks += 1;
+		submitted += args->updateSize;
+	}
+
+	if (chunksFilled != NULL)
+	{
+		*chunksFilled = chunks;
+	}
+	if (framesSubmitted != NULL)
+	{
+		*framesSubmitted = submitted;
 	}
 
 	return hr;
@@ -159,6 +174,13 @@ static DWORD WINAPI FAudio_AudioClientThread(void *user)
 	IAudioRenderClient *render_client;
 	HRESULT hr = S_OK;
 	UINT frames, padding = 0;
+	uint64_t lastWakeUs = 0;
+	uint64_t callbackIndex = 0;
+	uint64_t expectedCallbackUs;
+	uint32_t longWakeCount = 0;
+	uint32_t longFillCount = 0;
+	uint8_t prevBurstActive = 0;
+	uint32_t burstCallbackCount = 0;
 
 	FAudio_set_thread_name(__func__);
 
@@ -172,7 +194,11 @@ static DWORD WINAPI FAudio_AudioClientThread(void *user)
 	hr = IAudioClient_GetBufferSize(args->client, &frames);
 	FAudio_assert(!FAILED(hr) && "Failed to get IAudioClient buffer size!");
 
-	hr = FAudio_FillAudioClientBuffer(args, render_client, frames, 0);
+	expectedCallbackUs = (args->format.Format.nSamplesPerSec > 0) ?
+		(((uint64_t) args->updateSize * 1000000ULL) / (uint64_t) args->format.Format.nSamplesPerSec) :
+		10000ULL;
+
+	hr = FAudio_FillAudioClientBuffer(args, render_client, frames, 0, NULL, NULL);
 	FAudio_assert(!FAILED(hr) && "Failed to initialize IAudioClient buffer!");
 
 	hr = IAudioClient_Start(args->client);
@@ -180,7 +206,36 @@ static DWORD WINAPI FAudio_AudioClientThread(void *user)
 
 	while (WaitForMultipleObjects(2, args->events, FALSE, INFINITE) == WAIT_OBJECT_0)
 	{
+		uint64_t wakeUs = FAudio_INTERNAL_GetMicroseconds();
+		uint64_t wakeDeltaUs = (lastWakeUs > 0) ? (wakeUs - lastWakeUs) : expectedCallbackUs;
+		uint64_t beforePaddingUs;
+		uint64_t afterPaddingUs;
+		uint64_t beforeFillUs;
+		uint64_t afterFillUs;
+		uint64_t fillUs;
+		UINT chunksFilled = 0;
+		UINT framesSubmitted = 0;
+		UINT framesAvailable = 0;
+
+		lastWakeUs = wakeUs;
+		callbackIndex += 1;
+
+		if (wakeDeltaUs > (expectedCallbackUs + (expectedCallbackUs / 2)))
+		{
+			longWakeCount += 1;
+			LOG_WARNING(
+				args->audio,
+				"WASAPI-CADENCE-WAKE-LATE: idx=%llu wake_delta_ms=%.3f expected_ms=%.3f late_count=%u",
+				(unsigned long long) callbackIndex,
+				(double) wakeDeltaUs / 1000.0,
+				(double) expectedCallbackUs / 1000.0,
+				longWakeCount
+			)
+		}
+
+		beforePaddingUs = FAudio_INTERNAL_GetMicroseconds();
 		hr = IAudioClient_GetCurrentPadding(args->client, &padding);
+		afterPaddingUs = FAudio_INTERNAL_GetMicroseconds();
 		if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
 		{
 			/* Device was removed, just exit */
@@ -188,8 +243,106 @@ static DWORD WINAPI FAudio_AudioClientThread(void *user)
 		}
 		FAudio_assert(!FAILED(hr) && "Failed to get IAudioClient current padding!");
 
-		hr = FAudio_FillAudioClientBuffer(args, render_client, frames, padding);
+		if (padding <= frames)
+		{
+			framesAvailable = frames - padding;
+		}
+
+		beforeFillUs = FAudio_INTERNAL_GetMicroseconds();
+		hr = FAudio_FillAudioClientBuffer(
+			args,
+			render_client,
+			frames,
+			padding,
+			&chunksFilled,
+			&framesSubmitted
+		);
+		afterFillUs = FAudio_INTERNAL_GetMicroseconds();
+		fillUs = afterFillUs - beforeFillUs;
 		FAudio_assert(!FAILED(hr) && "Failed to fill IAudioClient buffer!");
+
+		if (fillUs > (expectedCallbackUs + (expectedCallbackUs / 4)))
+		{
+			longFillCount += 1;
+			LOG_WARNING(
+				args->audio,
+				"WASAPI-CADENCE-FILL-LATE: idx=%llu fill_ms=%.3f expected_ms=%.3f chunks=%u submitted_frames=%u pad=%u avail=%u fill_late_count=%u",
+				(unsigned long long) callbackIndex,
+				(double) fillUs / 1000.0,
+				(double) expectedCallbackUs / 1000.0,
+				(uint32_t) chunksFilled,
+				(uint32_t) framesSubmitted,
+				(uint32_t) padding,
+				(uint32_t) framesAvailable,
+				longFillCount
+			)
+		}
+
+		if (chunksFilled == 0 && framesAvailable >= args->updateSize)
+		{
+			LOG_WARNING(
+				args->audio,
+				"WASAPI-CADENCE-NO-SUBMIT: idx=%llu pad=%u avail=%u update=%u wake_ms=%.3f pad_query_ms=%.3f",
+				(unsigned long long) callbackIndex,
+				(uint32_t) padding,
+				(uint32_t) framesAvailable,
+				(uint32_t) args->updateSize,
+				(double) wakeDeltaUs / 1000.0,
+				(double) (afterPaddingUs - beforePaddingUs) / 1000.0
+			)
+		}
+
+		if (args->audio != NULL && !args->audio->wsolaDisabled)
+		{
+			uint8_t burstActive = args->audio->wsolaBurstActive;
+			if (burstActive && !prevBurstActive)
+			{
+				burstCallbackCount = 0;
+				LOG_INFO(
+					args->audio,
+					"WASAPI-WSOLA-BURST-ENTER: idx=%llu wake_ms=%.3f fill_ms=%.3f pad=%u avail=%u submitted_frames=%u",
+					(unsigned long long) callbackIndex,
+					(double) wakeDeltaUs / 1000.0,
+					(double) fillUs / 1000.0,
+					(uint32_t) padding,
+					(uint32_t) framesAvailable,
+					(uint32_t) framesSubmitted
+				)
+			}
+			if (burstActive)
+			{
+				burstCallbackCount += 1;
+				if ((burstCallbackCount % 25) == 0)
+				{
+					LOG_INFO(
+						args->audio,
+						"WASAPI-WSOLA-BURST-HEARTBEAT: idx=%llu burst_cb=%u wake_ms=%.3f fill_ms=%.3f pad=%u avail=%u submitted_frames=%u",
+						(unsigned long long) callbackIndex,
+						burstCallbackCount,
+						(double) wakeDeltaUs / 1000.0,
+						(double) fillUs / 1000.0,
+						(uint32_t) padding,
+						(uint32_t) framesAvailable,
+						(uint32_t) framesSubmitted
+					)
+				}
+			}
+			if (!burstActive && prevBurstActive)
+			{
+				LOG_INFO(
+					args->audio,
+					"WASAPI-WSOLA-BURST-EXIT: idx=%llu burst_cb=%u wake_ms=%.3f fill_ms=%.3f pad=%u avail=%u submitted_frames=%u",
+					(unsigned long long) callbackIndex,
+					burstCallbackCount,
+					(double) wakeDeltaUs / 1000.0,
+					(double) fillUs / 1000.0,
+					(uint32_t) padding,
+					(uint32_t) framesAvailable,
+					(uint32_t) framesSubmitted
+				)
+			}
+			prevBurstActive = burstActive;
+		}
 	}
 
 	hr = IAudioClient_Stop(args->client);
